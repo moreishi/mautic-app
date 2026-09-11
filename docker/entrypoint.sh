@@ -7,9 +7,12 @@ set -e
 # - Fixes permissions, then execs the role command
 
 ROLE="${DOCKER_MAUTIC_ROLE:-mautic_web}"
-# Allow `docker run image cron` / `worker` as shorthand (compose uses command: ["cron"])
+# Allow `docker run image cron` / `worker` as shorthand (compose uses command: ["cron"]).
+# Also strip the image default CMD ("apache2-foreground") so it is not passed
+# through as an argument to itself (apache2 would print usage and exit 1).
 if [ "${1:-}" = "cron" ]; then ROLE="mautic_cron"; shift; fi
 if [ "${1:-}" = "worker" ]; then ROLE="mautic_worker"; shift; fi
+if [ "${1:-}" = "apache2-foreground" ]; then shift; fi
 
 : "${MAUTIC_DB_HOST:=db}"
 : "${MAUTIC_DB_PORT:=3306}"
@@ -40,13 +43,13 @@ for i in $(seq 1 45); do
   sleep 2
 done
 
-# Generate local.php on first boot so config volume persists it
+# Generate minimal local.php on first boot so the config volume persists it.
+# NOTE: site_url and secret_key are intentionally OMITTED — Mautic's installer
+# treats their presence as "already installed" and skips (see InstallService).
+# The installer writes both itself on fresh installs; for pre-existing
+# databases we append site_url below.
 if [ ! -f "${LOCAL_PHP}" ]; then
   echo "[entrypoint] generating ${LOCAL_PHP} from environment..."
-  if [ -z "${MAUTIC_SITE_URL}" ]; then
-    echo "[entrypoint] ERROR: MAUTIC_SITE_URL is required for first install" >&2
-    exit 1
-  fi
   if [ -z "${MAUTIC_ADMIN_PASSWORD}" ] && [ "${ROLE}" = "mautic_web" ]; then
     echo "[entrypoint] ERROR: MAUTIC_ADMIN_PASSWORD is required for first install" >&2
     exit 1
@@ -79,6 +82,12 @@ chown -R www-data:www-data /var/www/html/config /var/www/html/var 2>/dev/null ||
 if [ "${ROLE}" = "mautic_web" ]; then
   if php bin/console doctrine:query:sql "SELECT 1 FROM users LIMIT 1" --env=prod >/dev/null 2>&1; then
     echo "[entrypoint] existing install detected"
+    # Fresh config volume + pre-existing DB: ensure site_url exists so Mautic
+    # does not redirect to /installer (installer would have written it).
+    if ! grep -q "'site_url'" "${LOCAL_PHP}"; then
+      echo "[entrypoint] adding site_url to ${LOCAL_PHP}..."
+      sed -i "s|^];|    'site_url' => '${MAUTIC_SITE_URL}',\n];|" "${LOCAL_PHP}"
+    fi
     if [ "${DOCKER_MAUTIC_RUN_MIGRATIONS}" = "true" ]; then
       echo "[entrypoint] running migrations..."
       php bin/console doctrine:migrations:migrate --no-interaction --env=prod || true

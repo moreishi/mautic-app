@@ -1,10 +1,14 @@
 # Keep build context small and secrets out of the image
+# NOTE: .env is REQUIRED in the image (Symfony Dotenv fatals without it) —
+# it holds only non-secret defaults (APP_ENV/APP_DEBUG). Local overrides
+# (.env.local, .env.*.local) and config/local.php stay excluded.
 .git
 .gitignore
 .ddev
-.env
 .env.local
 .env.*.local
+!.env
+!.env.test
 config/local.php
 var/cache/*
 var/logs/*

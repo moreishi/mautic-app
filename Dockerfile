@@ -72,11 +72,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 WORKDIR /var/www/html
 
 # Install PHP deps first (better layer caching). Path repo ./app provides mautic/core-lib.
+# --no-scripts: composer scripts need the full source + node, they run explicitly below.
 COPY composer.json composer.lock ./
 COPY app/composer.json ./app/composer.json
 COPY patches ./patches
-RUN composer install --no-dev --prefer-dist --no-progress --no-interaction --optimize-autoloader \
-    || (echo "composer install without scripts retry" && composer install --no-dev --prefer-dist --no-progress --no-interaction --optimize-autoloader --no-scripts)
+RUN composer install --no-dev --prefer-dist --no-progress --no-interaction --optimize-autoloader --no-scripts
 
 # Copy application source
 COPY . .
@@ -85,7 +85,10 @@ COPY . .
 COPY docker/php-coolify.ini /usr/local/etc/php/conf.d/zz-coolify.ini
 
 # Build frontend assets + Mautic assets. Prod zip has no build/gjs_build.php, so skip that script.
+# npx patch-package replaces the composer post-install script of the same name
+# (applies patches/at.js + patches/chosen-js to node_modules).
 RUN npm ci --prefer-offline --no-audit \
+    && npx patch-package \
     && npm run build \
     && php bin/console mautic:assets:generate --env=prod --no-interaction \
     && php bin/console cache:warmup --env=prod --no-interaction \
