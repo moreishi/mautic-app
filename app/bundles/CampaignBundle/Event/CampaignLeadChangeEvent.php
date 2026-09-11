@@ -1,0 +1,92 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\CampaignBundle\Event;
+
+use Mautic\CampaignBundle\Entity\Campaign;
+use Mautic\LeadBundle\Entity\Lead;
+use Symfony\Contracts\EventDispatcher\Event;
+
+final class CampaignLeadChangeEvent extends Event
+{
+    /**
+     * @var ?Lead
+     */
+    private $lead;
+
+    /**
+     * @var Lead[]
+     */
+    private array $leads = [];
+
+    /**
+     * @param Lead|Lead[] $leads
+     * @param ?string     $action
+     */
+    public function __construct(
+        private readonly Campaign $campaign,
+        $leads,
+        private $action,
+    ) {
+        if (is_array($leads)) {
+            $this->leads = $leads;
+        } else {
+            $this->lead = $leads;
+        }
+    }
+
+    /**
+     * Returns the Campaign entity.
+     */
+    public function getCampaign(): Campaign
+    {
+        return $this->campaign;
+    }
+
+    /**
+     * Returns the Lead entity.
+     *
+     * @return Lead|null
+     */
+    public function getLead()
+    {
+        return $this->lead;
+    }
+
+    /**
+     * If this is a batch event, return array of leads.
+     *
+     * @return Lead[]
+     */
+    public function getLeads(): array
+    {
+        return $this->leads;
+    }
+
+    /**
+     * Returns added or removed.
+     *
+     * @return string|null
+     */
+    public function getAction()
+    {
+        return $this->action;
+    }
+
+    /**
+     * Lead was removed from the campaign.
+     */
+    public function wasRemoved(): bool
+    {
+        return 'removed' === $this->action;
+    }
+
+    /**
+     * Lead was added to the campaign.
+     */
+    public function wasAdded(): bool
+    {
+        return 'added' === $this->action;
+    }
+}

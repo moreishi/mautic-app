@@ -1,0 +1,32 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\LeadBundle\Event;
+
+use Symfony\Contracts\EventDispatcher\Event;
+
+final class ContactExportEvent extends Event
+{
+    /**
+     * @param array<string|int, int|string|array<string, mixed>> $args
+     */
+    public function __construct(
+        private readonly array $args,
+        private readonly string $object,
+    ) {
+    }
+
+    /**
+     * @return array<string, string|array<string, mixed>>
+     */
+    public function getArgs(): array
+    {
+        return $this->args;
+    }
+
+    public function getObject(): string
+    {
+        return $this->object;
+    }
+}

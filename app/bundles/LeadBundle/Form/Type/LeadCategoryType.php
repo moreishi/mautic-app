@@ -1,0 +1,50 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\LeadBundle\Form\Type;
+
+use Mautic\CategoryBundle\Model\CategoryModel;
+use Symfony\Component\Form\AbstractType;
+use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+use Symfony\Component\OptionsResolver\Options;
+use Symfony\Component\OptionsResolver\OptionsResolver;
+
+/**
+ * @extends AbstractType<mixed>
+ */
+final class LeadCategoryType extends AbstractType
+{
+    public function __construct(
+        private readonly CategoryModel $categoryModel,
+    ) {
+    }
+
+    public function configureOptions(OptionsResolver $resolver): void
+    {
+        $resolver->setDefaults([
+            'choices'           => function (Options $options): array {
+                $categories = $this->categoryModel->getLookupResults('email', '', 0);
+                $choices    = [];
+
+                foreach ($categories as $cat) {
+                    $choices[$cat['title']] = $cat['id'];
+                }
+
+                return $choices;
+            },
+            'global_only' => true,
+            'required'    => false,
+        ]);
+    }
+
+    public function getParent(): string
+    {
+        return ChoiceType::class;
+    }
+
+    public function getBlockPrefix(): string
+    {
+        return 'leadcategory_choices';
+    }
+}

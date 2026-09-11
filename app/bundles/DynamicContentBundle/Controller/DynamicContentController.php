@@ -1,0 +1,570 @@
+<?php
+
+namespace Mautic\DynamicContentBundle\Controller;
+
+use Mautic\CoreBundle\Controller\FormController;
+use Mautic\CoreBundle\Form\Type\DateRangeType;
+use Mautic\CoreBundle\Model\AuditLogModel;
+use Mautic\DynamicContentBundle\Entity\DynamicContent;
+use Mautic\DynamicContentBundle\Helper\DynamicContentSearchScopeProvider;
+use Mautic\DynamicContentBundle\Model\DynamicContentModel;
+use Mautic\PageBundle\Model\PageModel;
+use Mautic\PageBundle\Model\TrackableModel;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Contracts\Service\Attribute\Required;
+
+final class DynamicContentController extends FormController
+{
+    private TrackableModel $trackableModel;
+
+    private PageModel $pageModel;
+
+    private AuditLogModel $auditLogModel;
+
+    private DynamicContentModel $dynamicContentModel;
+
+    #[Required]
+    public function autowireDynamicContentController(
+        AuditLogModel $auditLogModel,
+        DynamicContentModel $dynamicContentModel,
+        PageModel $pageModel,
+        TrackableModel $trackableModel,
+    ): void {
+        $this->auditLogModel = $auditLogModel;
+        $this->dynamicContentModel = $dynamicContentModel;
+        $this->pageModel = $pageModel;
+        $this->trackableModel = $trackableModel;
+    }
+
+    protected function getPermissions(): array
+    {
+        return (array) $this->security->isGranted(
+            [
+                'dynamiccontent:dynamiccontents:viewown',
+                'dynamiccontent:dynamiccontents:viewother',
+                'dynamiccontent:dynamiccontents:create',
+                'dynamiccontent:dynamiccontents:editown',
+                'dynamiccontent:dynamiccontents:editother',
+                'dynamiccontent:dynamiccontents:deleteown',
+                'dynamiccontent:dynamiccontents:deleteother',
+                'dynamiccontent:dynamiccontents:publishown',
+                'dynamiccontent:dynamiccontents:publishother',
+            ],
+            'RETURN_ARRAY'
+        );
+    }
+
+    public function indexAction(Request $request, DynamicContentSearchScopeProvider $dynamicContentSearchScopeProvider, $page = 1): Response
+    {
+        $permissions = $this->getPermissions();
+
+        if (!$permissions['dynamiccontent:dynamiccontents:viewown'] && !$permissions['dynamiccontent:dynamiccontents:viewother']) {
+            $this->throwAccessDenied();
+        }
+
+        $this->setListFilters();
+
+        $limit = $request->getSession()->get('mautic.dynamicContent.limit', $this->coreParametersHelper->get('default_pagelimit'));
+        $start = (1 === $page) ? 0 : (($page - 1) * $limit);
+        if ($start < 0) {
+            $start = 0;
+        }
+
+        // fetch
+        $search = $request->get('search', $request->getSession()->get('mautic.dynamicContent.filter', ''));
+        $request->getSession()->set('mautic.dynamicContent.filter', $search);
+
+        $filter = [
+            'string' => $search,
+            'force'  => [
+                ['column' => 'e.variantParent', 'expr' => 'isNull'],
+                ['column' => 'e.translationParent', 'expr' => 'isNull'],
+            ],
+        ];
+
+        $orderBy    = $request->getSession()->get('mautic.dynamicContent.orderby', 'e.name');
+        $orderByDir = $request->getSession()->get('mautic.dynamicContent.orderbydir', 'DESC');
+
+        $entities = $this->dynamicContentModel->getEntities(
+            [
+                'start'      => $start,
+                'limit'      => $limit,
+                'filter'     => $filter,
+                'orderBy'    => $orderBy,
+                'orderByDir' => $orderByDir,
+            ]
+        );
+
+        // set what page currently on so that we can return here after form submission/cancellation
+        $request->getSession()->set('mautic.dynamicContent.page', $page);
+
+        $tmpl = $request->isXmlHttpRequest() ? $request->get('tmpl', 'index') : 'index';
+        $categories = $this->pageModel->getLookupResults('category', '', 0);
+
+        return $this->delegateView(
+            [
+                'contentTemplate' => '@MauticDynamicContent/DynamicContent/list.html.twig',
+                'passthroughVars' => [
+                    'activeLink'    => '#mautic_dynamicContent_index',
+                    'mauticContent' => 'dynamicContent',
+                    'route'         => $this->generateUrl('mautic_dynamicContent_index', ['page' => $page]),
+                ],
+                'viewParameters' => [
+                    'searchValue'     => $search,
+                    'searchScopes'    => $dynamicContentSearchScopeProvider->getScopes(),
+                    'items'           => $entities,
+                    'categories'  => $categories,
+                    'page'        => $page,
+                    'limit'       => $limit,
+                    'permissions' => $permissions,
+                    'model'       => $this->dynamicContentModel,
+                    'tmpl'        => $tmpl,
+                ],
+            ]
+        );
+    }
+
+    public function newAction(Request $request, $entity = null): Response
+    {
+        if (!$this->security->isGranted('dynamiccontent:dynamiccontents:create')) {
+            $this->throwAccessDenied();
+        }
+
+        if (!$entity instanceof DynamicContent) {
+            $entity = new DynamicContent();
+        }
+        $method       = $request->getMethod();
+        $page         = $request->getSession()->get('mautic.dynamicContent.page', 1);
+        $retUrl       = $this->generateUrl('mautic_dynamicContent_index', ['page' => $page]);
+        $action       = $this->generateUrl('mautic_dynamicContent_action', ['objectAction' => 'new']);
+        $dwc          = $request->request->all()['dwc'] ?? [];
+        $updateSelect = 'POST' === $method
+            ? ($dwc['updateSelect'] ?? false)
+            : $request->get('updateSelect', false);
+        $form         = $this->dynamicContentModel->createForm($entity, $this->formFactory, $action, ['update_select' => $updateSelect]);
+
+        if (Request::METHOD_POST === $method) {
+            $valid = false;
+
+            if (!$cancelled = $this->isFormCancelled($form)) {
+                if ($valid = $this->isFormValid($form)) {
+                    $this->dynamicContentModel->saveEntity($entity);
+
+                    $this->addFlashMessage(
+                        'mautic.core.notice.created',
+                        [
+                            '%name%'      => $entity->getName(),
+                            '%menu_link%' => 'mautic_dynamicContent_index',
+                            '%url%'       => $this->generateUrl(
+                                'mautic_dynamicContent_action',
+                                [
+                                    'objectAction' => 'edit',
+                                    'objectId'     => $entity->getId(),
+                                ]
+                            ),
+                        ]
+                    );
+
+                    if ($this->getFormButton($form, ['buttons', 'save'])->isClicked()) {
+                        $viewParameters = [
+                            'objectAction' => 'view',
+                            'objectId'     => $entity->getId(),
+                        ];
+                        $retUrl   = $this->generateUrl('mautic_dynamicContent_action', $viewParameters);
+                        $template = 'Mautic\DynamicContentBundle\Controller\DynamicContentController::viewAction';
+                    } else {
+                        // return edit view so that all the session stuff is loaded
+                        return $this->editAction($request, $entity->getId(), true);
+                    }
+                }
+            } else {
+                $viewParameters = ['page' => $page];
+                $retUrl         = $this->generateUrl('mautic_dynamicContent_index', $viewParameters);
+                $template       = 'Mautic\DynamicContentBundle\Controller\DynamicContentController::indexAction';
+            }
+
+            $passthrough = [
+                'activeLink'    => '#mautic_dynamicContent_index',
+                'mauticContent' => 'dynamicContent',
+            ];
+
+            // Check to see if this is a popup
+            if (isset($form['updateSelect'])) {
+                $template    = false;
+                $passthrough = array_merge(
+                    $passthrough,
+                    [
+                        'updateSelect' => $form['updateSelect']->getData(),
+                        'id'           => $entity->getId(),
+                        'name'         => $entity->getName(),
+                        'group'        => $entity->getLanguage(),
+                    ]
+                );
+            }
+
+            if ($cancelled || ($valid && $this->getFormButton($form, ['buttons', 'save'])->isClicked())) {
+                return $this->postActionRedirect(
+                    [
+                        'returnUrl'       => $retUrl,
+                        'viewParameters'  => $viewParameters,
+                        'contentTemplate' => $template,
+                        'passthroughVars' => $passthrough,
+                    ]
+                );
+            }
+            if ($valid) {
+                return $this->editAction($request, $entity->getId(), true);
+            }
+        }
+
+        $passthrough['route'] = $action;
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'form' => $form->createView(),
+                ],
+                'contentTemplate' => '@MauticDynamicContent/DynamicContent/form.html.twig',
+                'passthroughVars' => $passthrough,
+            ]
+        );
+    }
+
+    /**
+     * Generate's edit form and processes post data.
+     *
+     * @param bool|false $ignorePost
+     */
+    public function editAction(Request $request, $objectId, $ignorePost = false): Response
+    {
+        $entity = $this->dynamicContentModel->getEntity($objectId);
+        $page   = $request->getSession()->get('mautic.dynamicContent.page', 1);
+        $retUrl = $this->generateUrl('mautic_dynamicContent_index', ['page' => $page]);
+
+        $postActionVars = [
+            'returnUrl'       => $retUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\DynamicContentBundle\Controller\DynamicContentController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => '#mautic_dynamicContent_index',
+                'mauticContent' => 'dynamicContent',
+            ],
+        ];
+
+        if (null === $entity) {
+            return $this->postActionRedirect(
+                array_merge(
+                    $postActionVars,
+                    [
+                        'flashes' => [
+                            [
+                                'type'    => 'error',
+                                'msg'     => 'mautic.dynamicContent.error.notfound',
+                                'msgVars' => ['%id%' => $objectId],
+                            ],
+                        ],
+                    ]
+                )
+            );
+        }
+        if (!$this->security->hasEntityAccess(true, 'dynamiccontent:dynamiccontents:editother', $entity->getCreatedBy())) {
+            $this->throwAccessDenied();
+        } elseif ($this->dynamicContentModel->isLocked($entity)) {
+            // deny access if the entity is locked
+            return $this->isLocked($postActionVars, $entity, 'dynamicContent');
+        }
+
+        $action       = $this->generateUrl('mautic_dynamicContent_action', ['objectAction' => 'edit', 'objectId' => $objectId]);
+        $method       = $request->getMethod();
+        $dwc          = $request->request->all()['dwc'] ?? [];
+        $updateSelect = 'POST' === $method
+            ? ($dwc['updateSelect'] ?? false)
+            : $request->get('updateSelect', false);
+
+        $form = $this->dynamicContentModel->createForm($entity, $this->formFactory, $action, ['update_select' => $updateSelect]);
+
+        // /Check for a submitted form and process it
+        if (!$ignorePost && 'POST' === $method) {
+            $valid = false;
+
+            if (!$cancelled = $this->isFormCancelled($form)) {
+                if ($valid = $this->isFormValid($form)) {
+                    // form is valid so process the data
+                    $this->dynamicContentModel->saveEntity($entity, $this->getFormButton($form, ['buttons', 'save'])->isClicked());
+
+                    $this->addFlashMessage(
+                        'mautic.core.notice.updated',
+                        [
+                            '%name%'      => $entity->getName(),
+                            '%menu_link%' => 'mautic_dynamicContent_index',
+                            '%url%'       => $this->generateUrl(
+                                'mautic_dynamicContent_action',
+                                [
+                                    'objectAction' => 'edit',
+                                    'objectId'     => $entity->getId(),
+                                ]
+                            ),
+                        ]
+                    );
+                }
+            } else {
+                // unlock the entity
+                $this->dynamicContentModel->unlockEntity($entity);
+            }
+
+            if ($cancelled || ($valid && $this->getFormButton($form, ['buttons', 'save'])->isClicked())) {
+                return $this->viewAction($request, $entity->getId());
+            }
+        } else {
+            // lock the entity
+            $this->dynamicContentModel->lockEntity($entity);
+        }
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'form'          => $form->createView(),
+                    'currentListId' => $objectId,
+                ],
+                'contentTemplate' => '@MauticDynamicContent/DynamicContent/form.html.twig',
+                'passthroughVars' => [
+                    'activeLink'    => '#mautic_dynamicContent_index',
+                    'route'         => $action,
+                    'mauticContent' => 'dynamicContent',
+                ],
+            ]
+        );
+    }
+
+    /**
+     * Loads a specific form into the detailed panel.
+     *
+     * @param int $objectId
+     */
+    public function viewAction(Request $request, $objectId): Response
+    {
+        $security = $this->security;
+        $entity   = $this->dynamicContentModel->getEntity($objectId);
+
+        // set the page we came from
+        $page = $request->getSession()->get('mautic.dynamicContent.page', 1);
+
+        if (null === $entity) {
+            // set the return URL
+            $returnUrl = $this->generateUrl('mautic_dynamicContent_index', ['page' => $page]);
+
+            return $this->postActionRedirect(
+                [
+                    'returnUrl'       => $returnUrl,
+                    'viewParameters'  => ['page' => $page],
+                    'contentTemplate' => 'Mautic\DynamicContentBundle\Controller\DynamicContentController::indexAction',
+                    'passthroughVars' => [
+                        'activeLink'    => '#mautic_dynamicContent_index',
+                        'mauticContent' => 'dynamicContent',
+                    ],
+                    'flashes' => [
+                        [
+                            'type'    => 'error',
+                            'msg'     => 'mautic.dynamicContent.error.notfound',
+                            'msgVars' => ['%id%' => $objectId],
+                        ],
+                    ],
+                ]
+            );
+        }
+        if (!$security->hasEntityAccess(
+            'dynamiccontent:dynamiccontents:viewown',
+            'dynamiccontent:dynamiccontents:viewother',
+            $entity->getCreatedBy()
+        )
+        ) {
+            $this->throwAccessDenied();
+        }
+
+        /** @var DynamicContent $translationParent */
+        /** @var DynamicContent[] $translationChildren */
+        [$translationParent, $translationChildren] = $entity->getTranslations();
+        $logs          = $this->auditLogModel->getLogForObject('dynamicContent', $entity->getId(), $entity->getDateAdded());
+
+        // Init the date range filter form
+        $dateRangeValues = $request->query->all()['daterange'] ?? $request->request->all()['daterange'] ?? [];
+        $action          = $this->generateUrl('mautic_dynamicContent_action', ['objectAction' => 'view', 'objectId' => $objectId]);
+        $dateRangeForm   = $this->formFactory->create(DateRangeType::class, $dateRangeValues, ['action' => $action]);
+        $entityViews     = $this->dynamicContentModel->getHitsLineChartData(
+            null,
+            new \DateTime($dateRangeForm->get('date_from')->getData()),
+            new \DateTime($dateRangeForm->get('date_to')->getData()),
+            null,
+            ['dynamic_content_id' => $entity->getId(), 'flag' => 'total_and_unique']
+        );
+        $trackables = $this->trackableModel->getTrackableList('dynamicContent', $entity->getId());
+
+        return $this->delegateView(
+            [
+                'returnUrl'       => $action,
+                'contentTemplate' => '@MauticDynamicContent/DynamicContent/details.html.twig',
+                'passthroughVars' => [
+                    'activeLink'    => '#mautic_dynamicContent_index',
+                    'mauticContent' => 'dynamicContent',
+                ],
+                'viewParameters' => [
+                    'entity'       => $entity,
+                    'permissions'  => $this->getPermissions(),
+                    'logs'         => $logs,
+                    'isEmbedded'   => $request->get('isEmbedded') ?: false,
+                    'translations' => [
+                        'parent'   => $translationParent,
+                        'children' => $translationChildren,
+                    ],
+                    'trackables'    => $trackables,
+                    'entityViews'   => $entityViews,
+                    'dateRangeForm' => $dateRangeForm->createView(),
+                ],
+            ]
+        );
+    }
+
+    public function cloneAction(Request $request, $objectId): Response
+    {
+        $entity = $this->dynamicContentModel->getEntity($objectId);
+
+        if (null != $entity) {
+            if (!$this->security->isGranted('dynamiccontent:dynamiccontents:create')
+                || !$this->security->hasEntityAccess(
+                    'dynamiccontent:dynamiccontents:viewown',
+                    'dynamiccontent:dynamiccontents:viewother',
+                    $entity->getCreatedBy()
+                )
+            ) {
+                $this->throwAccessDenied();
+            }
+
+            $entity = clone $entity;
+        }
+
+        return $this->newAction($request, $entity);
+    }
+
+    /**
+     * Deletes the entity.
+     */
+    public function deleteAction(Request $request, $objectId): Response
+    {
+        $page      = $request->getSession()->get('mautic.dynamicContent.page', 1);
+        $returnUrl = $this->generateUrl('mautic_dynamicContent_index', ['page' => $page]);
+        $flashes   = [];
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\DynamicContentBundle\Controller\DynamicContentController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => 'mautic_dynamicContent_index',
+                'mauticContent' => 'dynamicContent',
+            ],
+        ];
+
+        if (Request::METHOD_POST === $request->getMethod()) {
+            $entity = $this->dynamicContentModel->getEntity($objectId);
+
+            if (null === $entity) {
+                $flashes[] = [
+                    'type'    => 'error',
+                    'msg'     => 'mautic.dynamicContent.error.notfound',
+                    'msgVars' => ['%id%' => $objectId],
+                ];
+
+                return $this->postActionRedirect(array_merge($postActionVars, ['flashes' => $flashes]));
+            }
+            if (!$this->security->hasEntityAccess(
+                'dynamiccontent:dynamiccontents:deleteown',
+                'dynamiccontent:dynamiccontents:deleteother',
+                $entity->getCreatedBy()
+            )
+            ) {
+                $this->throwAccessDenied();
+            } elseif ($this->dynamicContentModel->isLocked($entity)) {
+                return $this->isLocked($postActionVars, $entity, 'notification');
+            }
+
+            $this->dynamicContentModel->deleteEntity($entity);
+
+            $flashes[] = [
+                'type'    => 'notice',
+                'msg'     => 'mautic.core.notice.deleted',
+                'msgVars' => [
+                    '%name%' => $entity->getName(),
+                    '%id%'   => $objectId,
+                ],
+            ];
+        } // else don't do anything
+
+        return $this->postActionRedirect(array_merge($postActionVars, ['flashes' => $flashes]));
+    }
+
+    /**
+     * Deletes a group of entities.
+     */
+    public function batchDeleteAction(Request $request): Response
+    {
+        $page      = $request->getSession()->get('mautic.dynamicContent.page', 1);
+        $returnUrl = $this->generateUrl('mautic_dynamicContent_index', ['page' => $page]);
+        $flashes   = [];
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\DynamicContentBundle\Controller\DynamicContentController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => '#mautic_dynamicContent_index',
+                'mauticContent' => 'dynamicContent',
+            ],
+        ];
+
+        if (Request::METHOD_POST === $request->getMethod()) {
+            $ids = json_decode($request->query->get('ids', '{}'));
+
+            $deleteIds = [];
+
+            // Loop over the IDs to perform access checks pre-delete
+            foreach ($ids as $objectId) {
+                $entity = $this->dynamicContentModel->getEntity($objectId);
+
+                if (null === $entity) {
+                    $flashes[] = [
+                        'type'    => 'error',
+                        'msg'     => 'mautic.dynamicContent.error.notfound',
+                        'msgVars' => ['%id%' => $objectId],
+                    ];
+                } elseif (!$this->security->hasEntityAccess(
+                    'dynamiccontent:dynamiccontents:viewown',
+                    'dynamiccontent:dynamiccontents:viewother',
+                    $entity->getCreatedBy()
+                )
+                ) {
+                    $flashes[] = $this->getAccessDeniedFlash();
+                } elseif ($this->dynamicContentModel->isLocked($entity)) {
+                    $flashes[] = $this->isLocked($postActionVars, $entity, 'dynamicContent', true);
+                } else {
+                    $deleteIds[] = $objectId;
+                }
+            }
+
+            // Delete everything we are able to
+            if ([] !== $deleteIds) {
+                $entities = $this->dynamicContentModel->deleteEntities($deleteIds);
+
+                $flashes[] = [
+                    'type'    => 'notice',
+                    'msg'     => 'mautic.dynamicContent.notice.batch_deleted',
+                    'msgVars' => [
+                        '%count%' => count($entities),
+                    ],
+                ];
+            }
+        } // else don't do anything
+
+        return $this->postActionRedirect(array_merge($postActionVars, ['flashes' => $flashes]));
+    }
+}

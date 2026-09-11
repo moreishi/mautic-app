@@ -1,0 +1,36 @@
+{% if emailStats is defined %}
+<div class="row">
+    <div class="lead-stats-title">{{ 'mautic.lead.stats.email_title'|trans }}</div>
+    {% include '@MauticCore/Modules/stat--icon.html.twig' with {
+            'stats': [
+                {
+                    'title': 'mautic.lead.stats.sent_count',
+                    'value': emailStats['sent_count'],
+                    'icon': 'ri-mail-send-line'
+                },
+                {
+                    'title': 'mautic.lead.stats.open_rate',
+                    'value': (emailStats['open_rate'] * 100)|number_format(0) ~ '%',
+                    'icon': 'ri-mail-open-line',
+                },
+                {
+                    'title': 'mautic.lead.stats.click_through_rate',
+                    'value': (emailStats['click_through_rate'] * 100)|number_format(0) ~ '%',
+                    'icon': 'ri-cursor-line',
+                },
+                {
+                    'title': 'mautic.lead.stats.click_through_open_rate',
+                    'value': (emailStats['click_through_open_rate'] * 100)|number_format(0) ~ '%',
+                    'icon': 'ri-bar-chart-line'
+                }
+            ]
+        } %}
+    {% if emailStats['sent_count'] == 0 and
+        emailStats['open_rate'] == 0 and
+        emailStats['click_through_rate'] == 0 and
+        emailStats['click_through_open_rate'] == 0
+    %}
+        {{ include('@MauticCore/Helper/no_information.html.twig', {'tip': 'mautic.contact.noinformation.statistics'}) }}
+    {% endif %}
+</div>
+{% endif %}

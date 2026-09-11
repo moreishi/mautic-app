@@ -1,0 +1,225 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\LeadBundle\Entity;
+
+use Doctrine\ORM\Mapping as ORM;
+use Mautic\ApiBundle\Serializer\Driver\ApiMetadataDriver;
+use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
+use Mautic\CoreBundle\Helper\InputHelper;
+
+class DoNotContact
+{
+    /**
+     * Lead is contactable.
+     */
+    public const IS_CONTACTABLE = 0;
+
+    /**
+     * Lead unsubscribed themselves.
+     */
+    public const UNSUBSCRIBED = 1;
+
+    /**
+     * Lead was unsubscribed due to an unsuccessful send.
+     */
+    public const BOUNCED = 2;
+
+    /**
+     * Lead was manually unsubscribed by user.
+     */
+    public const MANUAL = 3;
+
+    /**
+     * @var int
+     */
+    private $id;
+
+    /**
+     * @var Lead|null
+     */
+    private $lead;
+
+    /**
+     * @var \DateTimeInterface
+     */
+    private $dateAdded;
+
+    /**
+     * @var int
+     */
+    private $reason = 0;
+
+    /**
+     * @var string|null
+     */
+    private $comments;
+
+    /**
+     * @var string
+     */
+    private $channel;
+
+    private $channelId;
+
+    public static function loadMetadata(ORM\ClassMetadata $metadata): void
+    {
+        $builder = new ClassMetadataBuilder($metadata);
+
+        $builder->setTable('lead_donotcontact')
+            ->setCustomRepositoryClass(DoNotContactRepository::class)
+            ->addIndex(['lead_id', 'channel', 'reason'], 'leadid_reason_channel')
+            ->addIndex(['reason'], 'dnc_reason_search')
+            ->addIndex(['date_added'], 'dnc_date_added');
+
+        $builder->addId();
+
+        $builder->addLead(true, 'CASCADE', false, 'doNotContact');
+
+        $builder->addDateAdded();
+
+        $builder->createField('reason', 'smallint')
+            ->build();
+
+        $builder->createField('channel', 'string')
+            ->build();
+
+        $builder->addNamedField('channelId', 'integer', 'channel_id', true);
+
+        $builder->createField('comments', 'text')
+            ->nullable()
+            ->build();
+    }
+
+    /**
+     * Prepares the metadata for API usage.
+     */
+    public static function loadApiMetadata(ApiMetadataDriver $metadata): void
+    {
+        $metadata->setGroupPrefix('doNotContact')
+            ->addListProperties(
+                [
+                    'id',
+                    'dateAdded',
+                    'reason',
+                    'comments',
+                    'channel',
+                    'channelId',
+                ]
+            )
+            ->addProperties(
+                [
+                    'lead',
+                ]
+            )
+            ->build();
+    }
+
+    /**
+     * @return int
+     */
+    public function getId()
+    {
+        return $this->id;
+    }
+
+    /**
+     * @return Lead|null
+     */
+    public function getLead()
+    {
+        return $this->lead;
+    }
+
+    public function setLead(Lead $lead): static
+    {
+        $this->lead = $lead;
+
+        return $this;
+    }
+
+    /**
+     * @return \DateTimeInterface
+     */
+    public function getDateAdded()
+    {
+        return $this->dateAdded;
+    }
+
+    public function setDateAdded(\DateTime $dateAdded): static
+    {
+        $this->dateAdded = $dateAdded;
+
+        return $this;
+    }
+
+    /**
+     * @return int
+     */
+    public function getReason()
+    {
+        return $this->reason;
+    }
+
+    /**
+     * @param int $reason
+     */
+    public function setReason($reason): static
+    {
+        $this->reason = $reason;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getComments()
+    {
+        return $this->comments;
+    }
+
+    public function setComments(?string $comments): static
+    {
+        $this->comments = InputHelper::string((string) $comments);
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getChannel()
+    {
+        return $this->channel;
+    }
+
+    /**
+     * @param string $channel
+     */
+    public function setChannel($channel): static
+    {
+        $this->channel = $channel;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getChannelId()
+    {
+        return $this->channelId;
+    }
+
+    /**
+     * @param mixed $channelId
+     */
+    public function setChannelId($channelId): static
+    {
+        $this->channelId = $channelId;
+
+        return $this;
+    }
+}

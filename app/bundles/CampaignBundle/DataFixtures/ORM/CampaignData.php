@@ -1,0 +1,53 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\CampaignBundle\DataFixtures\ORM;
+
+use Doctrine\Common\DataFixtures\AbstractFixture;
+use Doctrine\Common\DataFixtures\OrderedFixtureInterface;
+use Doctrine\Persistence\ObjectManager;
+use Mautic\CampaignBundle\Entity\Campaign;
+
+final class CampaignData extends AbstractFixture implements OrderedFixtureInterface
+{
+    public function load(ObjectManager $manager): void
+    {
+        $campaign = new Campaign();
+
+        $campaign->setName('Campaign A');
+        $campaign->setCanvasSettings([
+            'nodes' => [
+                0 => [
+                    'id'        => '148',
+                    'positionX' => '760',
+                    'positionY' => '155',
+                ],
+                1 => [
+                    'id'        => 'lists',
+                    'positionX' => '860',
+                    'positionY' => '50',
+                ],
+            ],
+            'connections' => [
+                0 => [
+                    'sourceId' => 'lists',
+                    'targetId' => '148',
+                    'anchors'  => [
+                        'source' => 'leadsource',
+                        'target' => 'top',
+                    ],
+                ],
+            ],
+        ]
+        );
+
+        $manager->persist($campaign);
+        $manager->flush();
+    }
+
+    public function getOrder(): int
+    {
+        return 0;
+    }
+}

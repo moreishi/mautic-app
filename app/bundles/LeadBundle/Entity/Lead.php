@@ -1,0 +1,1937 @@
+<?php
+
+namespace Mautic\LeadBundle\Entity;
+
+use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\Delete;
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\Patch;
+use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Put;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
+use Doctrine\Common\Collections\Criteria;
+use Doctrine\Common\Collections\Order;
+use Doctrine\ORM\Mapping as ORM;
+use Mautic\ApiBundle\Serializer\Driver\ApiMetadataDriver;
+use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
+use Mautic\CoreBundle\Entity\FormEntity;
+use Mautic\CoreBundle\Entity\IpAddress;
+use Mautic\CoreBundle\Entity\SkipModifiedInterface;
+use Mautic\LeadBundle\DataObject\LeadManipulator;
+use Mautic\LeadBundle\Form\Validator\Constraints\UniqueCustomField;
+use Mautic\LeadBundle\Model\FieldModel;
+use Mautic\NotificationBundle\Entity\PushID;
+use Mautic\PointBundle\Entity\Group;
+use Mautic\PointBundle\Entity\GroupContactScore;
+use Mautic\StageBundle\Entity\Stage;
+use Mautic\UserBundle\Entity\User;
+use Symfony\Component\Serializer\Attribute\Groups;
+use Symfony\Component\Validator\Mapping\ClassMetadata;
+
+#[ApiResource(
+    shortName: 'Contacts',
+    operations: [
+        new GetCollection(uriTemplate: '/contacts', security: "is_granted('lead:leads:viewown')"),
+        new Post(uriTemplate: '/contacts', security: "is_granted('lead:leads:create')"),
+        new Get(uriTemplate: '/contacts/{id}', security: "is_granted('lead:leads:viewown', object)"),
+        new Put(uriTemplate: '/contacts/{id}', security: "is_granted('lead:leads:editown', object)"),
+        new Patch(uriTemplate: '/contacts/{id}', security: "is_granted('lead:leads:editother', object)"),
+        new Delete(uriTemplate: '/contacts/{id}', security: "is_granted('lead:leads:deleteown', object)"),
+    ],
+    normalizationContext: [
+        'groups'                  => ['contact:read'],
+        'swagger_definition_name' => 'Read',
+        'api_included'            => ['owner', 'stage', 'tags'],
+    ],
+    denormalizationContext: [
+        'groups'                  => ['contact:write'],
+        'swagger_definition_name' => 'Write',
+    ]
+)]
+class Lead extends FormEntity implements CustomFieldEntityInterface, IdentifierFieldEntityInterface, SkipModifiedInterface
+{
+    use CustomFieldEntityTrait;
+
+    public const FIELD_ALIAS     = '';
+
+    public const POINTS_ADD      = 'plus';
+
+    public const POINTS_SUBTRACT = 'minus';
+
+    public const POINTS_MULTIPLY = 'times';
+
+    public const POINTS_DIVIDE   = 'divide';
+
+    public const POINTS_SET      = 'set';
+
+    public const DEFAULT_ALIAS   = 'l';
+
+    /**
+     * Used to determine social identity.
+     *
+     * @var array
+     */
+    private $availableSocialFields = [];
+
+    /**
+     * @var string
+     */
+    #[Groups(['contact:read', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $id;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $title;
+
+    #[Groups(['contact:read', 'contact:write', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $firstname;
+
+    #[Groups(['contact:read', 'contact:write', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $lastname;
+
+    #[Groups(['contact:read', 'contact:write', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $company;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $position;
+
+    #[Groups(['contact:read', 'contact:write', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $email;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $phone;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $mobile;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $address1;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $address2;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $city;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $state;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $zipcode;
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['contact:read', 'contact:write'])]
+    private $timezone;
+
+    #[Groups(['contact:read', 'contact:write'])]
+    private $country;
+
+    /**
+     * @var User|null
+     */
+    #[Groups(['contact:read', 'contact:write', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $owner;
+
+    /**
+     * @var int
+     */
+    #[Groups(['contact:read', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $points = 0;
+
+    private array $pointChanges = [];
+
+    /**
+     * @var int|null
+     */
+    private $updatedPoints;
+
+    /**
+     * @var Collection<int, PointsChangeLog>
+     */
+    private $pointsChangeLog;
+
+    private ?int $actualPoints = null;
+
+    /**
+     * @var Collection<int, CompanyChangeLog>
+     */
+    private $companyChangeLog;
+
+    /**
+     * @var Collection<string, DoNotContact>
+     */
+    private $doNotContact;
+
+    /**
+     * @var Collection<string, IpAddress>
+     */
+    private $ipAddresses;
+
+    /**
+     * @var Collection<int, PushID>
+     */
+    private $pushIds;
+
+    /**
+     * @var ArrayCollection<int, LeadEventLog>
+     */
+    private $eventLog;
+
+    /**
+     * @var \DateTimeInterface
+     */
+    #[Groups(['contact:read'])]
+    private $lastActive;
+
+    /**
+     * @var array
+     */
+    private $internal = [];
+
+    /**
+     * @var array
+     */
+    private $socialCache = [];
+
+    /**
+     * Used to populate trigger color.
+     *
+     * @var string
+     */
+    private $color;
+
+    /**
+     * @var LeadManipulator
+     */
+    private $manipulator;
+
+    /**
+     * @var bool
+     */
+    private $newlyCreated = false;
+
+    /**
+     * @var \DateTimeInterface
+     */
+    #[Groups(['contact:read'])]
+    private $dateIdentified;
+
+    /**
+     * @var Collection<int, LeadNote>
+     */
+    private $notes;
+
+    /**
+     * @var string|null
+     */
+    private $preferredProfileImage = 'gravatar';
+
+    /**
+     * @var bool
+     */
+    public $imported = false;
+
+    /**
+     * @var Collection<string, Tag>
+     */
+    #[Groups(['contact:read', 'contact:write', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $tags;
+
+    /**
+     * @var Stage|null
+     */
+    #[Groups(['contact:read', 'contact:write', 'segment:read', 'campaign:read', 'email:read', 'sms:read'])]
+    private $stage;
+
+    /**
+     * @var Collection<int, StagesChangeLog>
+     */
+    private $stageChangeLog;
+
+    /**
+     * @var Collection<int, UtmTag>
+     */
+    private $utmtags;
+
+    /**
+     * @var Collection<int, FrequencyRule>
+     */
+    private $frequencyRules;
+
+    /**
+     * @var ArrayCollection<int,GroupContactScore>
+     */
+    private $groupScores;
+
+    private int $previousId = 0;
+
+    private $primaryCompany;
+
+    /**
+     * Used to determine order of preferred channels.
+     *
+     * @var array
+     */
+    private $channelRules = [];
+
+    public function __construct()
+    {
+        $this->ipAddresses      = new ArrayCollection();
+        $this->pushIds          = new ArrayCollection();
+        $this->eventLog         = new ArrayCollection();
+        $this->doNotContact     = new ArrayCollection();
+        $this->pointsChangeLog  = new ArrayCollection();
+        $this->tags             = new ArrayCollection();
+        $this->stageChangeLog   = new ArrayCollection();
+        $this->frequencyRules   = new ArrayCollection();
+        $this->companyChangeLog = new ArrayCollection();
+        $this->groupScores      = new ArrayCollection();
+    }
+
+    public static function loadMetadata(ORM\ClassMetadata $metadata): void
+    {
+        $builder = new ClassMetadataBuilder($metadata);
+
+        $builder->setTable('leads')
+            ->setCustomRepositoryClass(LeadRepository::class)
+            ->addLifecycleEvent('checkDateIdentified', 'preUpdate')
+            ->addLifecycleEvent('checkDateIdentified', 'prePersist')
+            ->addLifecycleEvent('checkAttributionDate', 'preUpdate')
+            ->addLifecycleEvent('checkAttributionDate', 'prePersist')
+            ->addLifecycleEvent('checkDateAdded', 'prePersist')
+            ->addIndex(['date_added'], 'lead_date_added')
+            ->addIndex(['date_modified'], 'lead_date_modified')
+            ->addIndex(['date_identified'], 'date_identified')
+            ->addIndex(['last_active'], 'last_active');
+
+        $builder->addBigIntIdField();
+
+        $builder->createManyToOne('owner', User::class)
+            ->fetchLazy()
+            ->addJoinColumn('owner_id', 'id', true, false, 'SET NULL')
+            ->build();
+
+        $builder->createField('points', 'integer')
+            ->build();
+
+        $builder->createOneToMany('pointsChangeLog', 'PointsChangeLog')
+            ->orphanRemoval()
+            ->setOrderBy(['dateAdded' => 'DESC'])
+            ->mappedBy('lead')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createOneToMany('companyChangeLog', 'CompanyChangeLog')
+            ->orphanRemoval()
+            ->setOrderBy(['dateAdded' => 'DESC'])
+            ->mappedBy('lead')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createOneToMany('doNotContact', DoNotContact::class)
+            ->orphanRemoval()
+            ->mappedBy('lead')
+            ->cascadePersist()
+            ->cascadeDetach()
+            ->cascadeMerge()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createManyToMany('ipAddresses', IpAddress::class)
+            ->setJoinTable('lead_ips_xref')
+            ->addInverseJoinColumn('ip_id', 'id', true, false, 'CASCADE')
+            ->addJoinColumn('lead_id', 'id', false, false, 'CASCADE')
+            ->setIndexBy('ipAddress')
+            ->cascadeDetach()
+            ->cascadeMerge()
+            ->cascadePersist()
+            ->build();
+
+        $builder->createOneToMany('pushIds', PushID::class)
+            ->orphanRemoval()
+            ->mappedBy('lead')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createOneToMany('eventLog', LeadEventLog::class)
+            ->mappedBy('lead')
+            ->cascadePersist()
+            ->cascadeMerge()
+            ->cascadeDetach()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createField('lastActive', 'datetime')
+            ->columnName('last_active')
+            ->nullable()
+            ->build();
+
+        $builder->createField('internal', 'array')
+            ->nullable()
+            ->build();
+
+        $builder->createField('socialCache', 'array')
+            ->columnName('social_cache')
+            ->nullable()
+            ->build();
+
+        $builder->createField('dateIdentified', 'datetime')
+            ->columnName('date_identified')
+            ->nullable()
+            ->build();
+
+        $builder->createOneToMany('notes', 'LeadNote')
+            ->orphanRemoval()
+            ->setOrderBy(['dateAdded' => 'DESC'])
+            ->mappedBy('lead')
+            ->cascadeDetach()
+            ->cascadeMerge()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createField('preferredProfileImage', 'string')
+            ->columnName('preferred_profile_image')
+            ->nullable()
+            ->build();
+
+        $builder->createManyToMany('tags', Tag::class)
+            ->setJoinTable('lead_tags_xref')
+            ->addInverseJoinColumn('tag_id', 'id', false)
+            ->addJoinColumn('lead_id', 'id', false, false, 'CASCADE')
+            ->setOrderBy(['tag' => 'ASC'])
+            ->setIndexBy('tag')
+            ->fetchLazy()
+            ->cascadeMerge()
+            ->cascadePersist()
+            ->cascadeDetach()
+            ->build();
+
+        $builder->createManyToOne('stage', Stage::class)
+            ->cascadePersist()
+            ->cascadeMerge()
+            ->cascadeDetach()
+            ->addJoinColumn('stage_id', 'id', true, false, 'SET NULL')
+            ->build();
+
+        $builder->createOneToMany('stageChangeLog', 'StagesChangeLog')
+            ->orphanRemoval()
+            ->setOrderBy(['dateAdded' => 'DESC'])
+            ->mappedBy('lead')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createOneToMany('utmtags', UtmTag::class)
+            ->orphanRemoval()
+            ->mappedBy('lead')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createOneToMany('frequencyRules', FrequencyRule::class)
+            ->orphanRemoval()
+            ->setIndexBy('channel')
+            ->setOrderBy(['dateAdded' => 'DESC'])
+            ->mappedBy('lead')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createOneToMany('groupScores', GroupContactScore::class)
+            ->mappedBy('contact')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        self::loadFixedFieldMetadata(
+            $builder,
+            [
+                'title',
+                'firstname',
+                'lastname',
+                'company',
+                'position',
+                'email',
+                'phone',
+                'mobile',
+                'address1',
+                'address2',
+                'city',
+                'state',
+                'zipcode',
+                'timezone',
+                'country',
+            ],
+            FieldModel::$coreFields
+        );
+    }
+
+    /**
+     * Prepares the metadata for API usage.
+     */
+    public static function loadApiMetadata(ApiMetadataDriver $metadata): void
+    {
+        $metadata->setRoot('lead')
+            ->setGroupPrefix('leadBasic')
+            ->addListProperties(
+                [
+                    'id',
+                    'points',
+                    'color',
+                    'title',
+                    'firstname',
+                    'lastname',
+                    'company',
+                    'position',
+                    'email',
+                    'phone',
+                    'mobile',
+                    'address1',
+                    'address2',
+                    'city',
+                    'state',
+                    'zipcode',
+                    'timezone',
+                    'country',
+                ]
+            )
+            ->setGroupPrefix('lead')
+            ->addListProperties(
+                [
+                    'id',
+                    'points',
+                    'color',
+                    'fields',
+                ]
+            )
+            ->addProperties(
+                [
+                    'lastActive',
+                    'owner',
+                    'ipAddresses',
+                    'tags',
+                    'utmtags',
+                    'stage',
+                    'dateIdentified',
+                    'preferredProfileImage',
+                    'doNotContact',
+                    'frequencyRules',
+                ]
+            )
+            ->build();
+    }
+
+    public static function loadValidatorMetadata(ClassMetadata $metadata): void
+    {
+        $metadata->addConstraint(new UniqueCustomField(object: 'lead'));
+    }
+
+    public static function getDefaultIdentifierFields(): array
+    {
+        return [
+            'firstname',
+            'lastname',
+            'company',
+            'email',
+        ];
+    }
+
+    /**
+     * @param string     $prop
+     * @param mixed      $val
+     * @param mixed|null $oldValue
+     */
+    protected function isChanged($prop, $val, $oldValue = null): void
+    {
+        $getter  = 'get'.ucfirst($prop);
+        $current = $oldValue ?? $this->{$getter}();
+        if ('owner' == $prop) {
+            if ($current && !$val) {
+                $this->changes['owner'] = [$current->getId(), $val];
+            } elseif (!$current && $val) {
+                $this->changes['owner'] = [$current, $val->getId()];
+            } elseif ($current && $val && $current->getId() != $val->getId()) {
+                $this->changes['owner'] = [$current->getId(), $val->getId()];
+            }
+        } elseif ('ipAddresses' == $prop) {
+            $this->changes['ipAddresses'] = ['', $val->getIpAddress()]; // Kept for BC. Not a good way to track changes on a collection
+
+            if (empty($this->changes['ipAddressList'])) {
+                $this->changes['ipAddressList'] = [];
+            }
+
+            $this->changes['ipAddressList'][$val->getIpAddress()] = $val;
+        } elseif ('tags' == $prop) {
+            if ($val instanceof Tag) {
+                $this->changes['tags']['added'][] = $val->getTag();
+            } else {
+                $this->changes['tags']['removed'][] = $val;
+            }
+        } elseif ('utmtags' == $prop) {
+            if ($val instanceof UtmTag) {
+                if ($val->getUtmContent()) {
+                    $this->changes['utmtags'] = ['utm_content', $val->getUtmContent()];
+                }
+                if ($val->getUtmMedium()) {
+                    $this->changes['utmtags'] = ['utm_medium', $val->getUtmMedium()];
+                }
+                if ($val->getUtmCampaign()) {
+                    $this->changes['utmtags'] = ['utm_campaign', $val->getUtmCampaign()];
+                }
+                if ($val->getUtmTerm()) {
+                    $this->changes['utmtags'] = ['utm_term', $val->getUtmTerm()];
+                }
+                if ($val->getUtmSource()) {
+                    $this->changes['utmtags'] = ['utm_source', $val->getUtmSource()];
+                }
+            }
+        } elseif ('frequencyRules' == $prop) {
+            if (!isset($this->changes['frequencyRules'])) {
+                $this->changes['frequencyRules'] = [];
+            }
+
+            if ($val instanceof FrequencyRule) {
+                $channel = $val->getChannel();
+
+                $this->changes['frequencyRules'][$channel] = $val->getChanges();
+            } else {
+                $this->changes['frequencyRules']['removed'][] = $val;
+            }
+        } elseif ('stage' == $prop) {
+            if ($current && !$val) {
+                $this->changes['stage'] = [$current->getId(), $val];
+            } elseif (!$current && $val) {
+                $this->changes['stage'] = [$current, $val->getId()];
+            } elseif ($current && $val && $current->getId() != $val->getId()) {
+                $this->changes['stage'] = [$current->getId(), $val->getId()];
+            }
+        } elseif ('points' == $prop && $current != $val) {
+            $this->changes['points'] = [$current, $val];
+        } else {
+            parent::isChanged($prop, $val);
+        }
+    }
+
+    public function convertToArray(): array
+    {
+        return get_object_vars($this);
+    }
+
+    /**
+     * @param int $id
+     */
+    public function setId($id): static
+    {
+        $this->id = (string) $id;
+
+        return $this;
+    }
+
+    public function getId(): int
+    {
+        return (int) $this->id;
+    }
+
+    public function setOwner(?User $owner = null): static
+    {
+        $this->isChanged('owner', $owner);
+        $this->owner = $owner;
+
+        return $this;
+    }
+
+    /**
+     * @return User|null
+     */
+    public function getOwner()
+    {
+        return $this->owner;
+    }
+
+    /**
+     * Returns the user to be used for permissions.
+     *
+     * @return User|int
+     */
+    public function getPermissionUser()
+    {
+        return $this->owner ?? $this->getCreatedBy();
+    }
+
+    public function addIpAddress(IpAddress $ipAddress): self
+    {
+        if (!$ipAddress->isTrackable()) {
+            return $this;
+        }
+
+        $ip = $ipAddress->getIpAddress();
+        if (null !== $ip && !isset($this->ipAddresses[$ip])) {
+            $this->isChanged('ipAddresses', $ipAddress);
+            $this->ipAddresses[$ip] = $ipAddress;
+        }
+
+        return $this;
+    }
+
+    public function removeIpAddress(IpAddress $ipAddress): void
+    {
+        $this->ipAddresses->removeElement($ipAddress);
+    }
+
+    /**
+     * @return Collection
+     */
+    public function getIpAddresses()
+    {
+        return $this->ipAddresses;
+    }
+
+    /**
+     * Get full name.
+     *
+     * @param bool $lastFirst
+     *
+     * @return string
+     */
+    public function getName($lastFirst = false)
+    {
+        $firstName = $this->firstname;
+        $lastName  = $this->lastname;
+
+        $fullName = '';
+        if ($lastFirst && $firstName && $lastName) {
+            $fullName = $lastName.', '.$firstName;
+        } elseif ($firstName && $lastName) {
+            $fullName = $firstName.' '.$lastName;
+        } elseif ($firstName) {
+            $fullName = $firstName;
+        } elseif ($lastName) {
+            $fullName = $lastName;
+        }
+
+        return $fullName;
+    }
+
+    /**
+     * @return string
+     */
+    public function getPreferredLocale()
+    {
+        if (isset($this->updatedFields['preferred_locale'])) {
+            return $this->updatedFields['preferred_locale'];
+        }
+
+        if (!empty($this->fields['core']['preferred_locale']['value'])) {
+            return $this->fields['core']['preferred_locale']['value'];
+        }
+
+        return '';
+    }
+
+    /**
+     * Get the primary identifier for the lead.
+     *
+     * @param bool $lastFirst
+     *
+     * @return string
+     */
+    public function getPrimaryIdentifier($lastFirst = false)
+    {
+        if ($name = $this->getName($lastFirst)) {
+            return $name;
+        }
+        if ($this->company) {
+            return $this->company;
+        }
+        if ($this->email) {
+            return $this->email;
+        }
+        if ($socialIdentity = $this->getFirstSocialIdentity()) {
+            return $socialIdentity;
+        }
+        if (count($ips = $this->ipAddresses)) {
+            return $ips->first()->getIpAddress();
+        }
+
+        return 'mautic.lead.lead.anonymous';
+    }
+
+    /**
+     * Get the secondary identifier for the lead; mainly company.
+     *
+     * @return string
+     */
+    public function getSecondaryIdentifier()
+    {
+        if ($this->company) {
+            return $this->company;
+        }
+
+        return '';
+    }
+
+    /**
+     * Get the location for the lead.
+     */
+    public function getLocation(): string
+    {
+        $location = '';
+
+        if ($this->city) {
+            $location .= $this->city.', ';
+        }
+
+        if ($this->state) {
+            $location .= $this->state.', ';
+        }
+
+        if ($this->country) {
+            $location .= $this->country.', ';
+        }
+
+        return rtrim($location, ', ');
+    }
+
+    /**
+     * Point changes are tracked and will be persisted as a direct DB query to avoid PHP memory overwrites with concurrent requests
+     * The risk in this is that the $changes['points'] may not be accurate but at least no points are lost.
+     *
+     * @param int    $points
+     * @param string $operator
+     */
+    public function adjustPoints($points, $operator = self::POINTS_ADD): static
+    {
+        if (!$points = (int) $points) {
+            return $this;
+        }
+
+        // Use $updatedPoints in an attempt to keep track in the $changes log although this may not be accurate if the DB updates the points rather
+        // than PHP memory
+        if (null == $this->updatedPoints) {
+            $this->updatedPoints = $this->points;
+        }
+        $oldPoints = $this->updatedPoints;
+
+        switch ($operator) {
+            case self::POINTS_ADD:
+                $this->updatedPoints += $points;
+                $operator = '+';
+                break;
+            case self::POINTS_SUBTRACT:
+                $this->updatedPoints -= $points;
+                $operator = '-';
+                break;
+            case self::POINTS_MULTIPLY:
+                $this->updatedPoints *= $points;
+                $operator = '*';
+                break;
+            case self::POINTS_DIVIDE:
+                $this->updatedPoints /= $points;
+                $operator = '/';
+                break;
+            default:
+                throw new \UnexpectedValueException('Invalid operator');
+        }
+
+        // Keep track of point changes to make a direct DB query
+        // Ignoring Aunt Sally here (PEMDAS)
+        if (!isset($this->pointChanges[$operator])) {
+            $this->pointChanges[$operator] = 0;
+        }
+        $this->pointChanges[$operator] += $points;
+
+        $this->isChanged('points', (int) $this->updatedPoints, (int) $oldPoints);
+
+        return $this;
+    }
+
+    public function getPointChanges(): array
+    {
+        return $this->pointChanges;
+    }
+
+    /**
+     * @param int $points
+     */
+    public function setPoints($points): static
+    {
+        $this->isChanged('points', $points);
+        $this->points = (int) $points;
+
+        // Something is setting points directly so reset points updated by database
+        $this->resetPointChanges();
+
+        return $this;
+    }
+
+    /**
+     * @return int
+     */
+    public function getPoints()
+    {
+        return ($this->actualPoints ?? $this->updatedPoints) ?? $this->points;
+    }
+
+    /**
+     * Set by the repository method when points are updated and requeried directly on the DB side.
+     */
+    public function setActualPoints($points): void
+    {
+        $this->actualPoints = (int) $points;
+        $this->pointChanges = [];
+    }
+
+    public function resetPointChanges(): static
+    {
+        $this->actualPoints  = null;
+        $this->pointChanges  = [];
+        $this->updatedPoints = null;
+
+        return $this;
+    }
+
+    /**
+     * Creates a points change entry.
+     */
+    public function addPointsChangeLogEntry(string $type, string $name, string $action, int $pointChanges, IpAddress $ip, ?Group $group = null): void
+    {
+        if (0 === $pointChanges) {
+            // No need to record no change
+            return;
+        }
+
+        // Create a new points change event
+        $event = new PointsChangeLog();
+        $event->setType($type);
+        $event->setEventName($name);
+        $event->setActionName($action);
+        $event->setDateAdded(new \DateTime());
+        $event->setDelta($pointChanges);
+        $event->setIpAddress($ip);
+        $event->setLead($this);
+        if ($group) {
+            $event->setGroup($group);
+        }
+        $this->addPointsChangeLog($event);
+    }
+
+    public function addPointsChangeLog(PointsChangeLog $pointsChangeLog): static
+    {
+        $this->pointsChangeLog[] = $pointsChangeLog;
+
+        return $this;
+    }
+
+    /**
+     * Creates a points change entry.
+     */
+    public function stageChangeLogEntry(Stage $stage, $name, $action): void
+    {
+        // create a new points change event
+        $event = new StagesChangeLog();
+        $event->setStage($stage);
+        $event->setEventName($name);
+        $event->setActionName($action);
+        $event->setDateAdded(new \DateTime());
+        $event->setLead($this);
+        $this->stageChangeLog($event);
+    }
+
+    /**
+     * Add StagesChangeLog.
+     */
+    public function stageChangeLog(StagesChangeLog $stageChangeLog): static
+    {
+        $this->stageChangeLog[] = $stageChangeLog;
+
+        return $this;
+    }
+
+    /**
+     * @return Collection<int, StagesChangeLog>
+     */
+    public function getStageChangeLog()
+    {
+        return $this->stageChangeLog;
+    }
+
+    public function removePointsChangeLog(PointsChangeLog $pointsChangeLog): void
+    {
+        $this->pointsChangeLog->removeElement($pointsChangeLog);
+    }
+
+    /**
+     * @return Collection
+     */
+    public function getPointsChangeLog()
+    {
+        return $this->pointsChangeLog;
+    }
+
+    public function addCompanyChangeLogEntry($type, $name, $action, $company = null): ?CompanyChangeLog
+    {
+        if (!$company) {
+            // No need to record a null delta
+            return null;
+        }
+
+        // Create a new company change event
+        $event = new CompanyChangeLog();
+        $event->setType($type);
+        $event->setEventName($name);
+        $event->setActionName($action);
+        $event->setDateAdded(new \DateTime());
+        $event->setCompany($company);
+        $event->setLead($this);
+        $this->addCompanyChangeLog($event);
+
+        return $event;
+    }
+
+    public function addCompanyChangeLog(CompanyChangeLog $companyChangeLog): static
+    {
+        $this->companyChangeLog[] = $companyChangeLog;
+
+        return $this;
+    }
+
+    /**
+     * @return ArrayCollection<int,CompanyChangeLog>
+     */
+    public function getCompanyChangeLog()
+    {
+        return $this->companyChangeLog;
+    }
+
+    /**
+     * @param bool $enabled
+     * @param bool $mobile
+     */
+    public function addPushIDEntry($identifier, $enabled = true, $mobile = false): static
+    {
+        $entity = new PushID();
+
+        /** @var PushID $id */
+        foreach ($this->pushIds as $id) {
+            if ($id->getPushID() === $identifier) {
+                if ($id->isEnabled() === $enabled) {
+                    return $this;
+                }
+                $entity = $id;
+                $this->removePushID($id);
+            }
+        }
+
+        $entity->setPushID($identifier);
+        $entity->setLead($this);
+        $entity->setEnabled($enabled);
+        $entity->setMobile($mobile);
+
+        $this->addPushID($entity);
+
+        $this->isChanged('pushIds', $this->pushIds);
+
+        return $this;
+    }
+
+    public function addPushID(PushID $pushID): static
+    {
+        $this->pushIds[] = $pushID;
+
+        return $this;
+    }
+
+    public function removePushID(PushID $pushID): void
+    {
+        $this->pushIds->removeElement($pushID);
+    }
+
+    /**
+     * @return Collection<int, PushID>
+     */
+    public function getPushIDs()
+    {
+        return $this->pushIds;
+    }
+
+    public function addEventLog(LeadEventLog $log): static
+    {
+        $this->eventLog[] = $log;
+        $log->setLead($this);
+
+        return $this;
+    }
+
+    public function removeEventLog(LeadEventLog $eventLog): void
+    {
+        $this->eventLog->removeElement($eventLog);
+    }
+
+    public function getLastEventLogByAction(string $action): ?LeadEventLog
+    {
+        $criteria = Criteria::create()
+            ->where(Criteria::expr()->eq('action', $action))
+            ->orderBy(['dateAdded' => Order::Descending->value])
+            ->setFirstResult(0)
+            ->setMaxResults(1);
+
+        return $this->eventLog->matching($criteria)->first() ?: null;
+    }
+
+    public function addDoNotContactEntry(DoNotContact $doNotContact): static
+    {
+        $this->changes['dnc_channel_status'][$doNotContact->getChannel()] = [
+            'reason'   => $doNotContact->getReason(),
+            'comments' => $doNotContact->getComments(),
+        ];
+
+        $this->doNotContact[$doNotContact->getChannel()] = $doNotContact;
+
+        return $this;
+    }
+
+    public function removeDoNotContactEntry(DoNotContact $doNotContact): void
+    {
+        $this->changes['dnc_channel_status'][$doNotContact->getChannel()] = [
+            'reason'     => DoNotContact::IS_CONTACTABLE,
+            'old_reason' => $doNotContact->getReason(),
+            'comments'   => $doNotContact->getComments(),
+        ];
+
+        $this->doNotContact->removeElement($doNotContact);
+    }
+
+    /**
+     * @return Collection<string, DoNotContact>
+     */
+    public function getDoNotContact(): Collection
+    {
+        return $this->doNotContact;
+    }
+
+    /**
+     * Set internal storage.
+     */
+    public function setInternal($internal): void
+    {
+        $this->internal = $internal;
+    }
+
+    /**
+     * Get internal storage.
+     *
+     * @return array<mixed>
+     */
+    public function getInternal()
+    {
+        return $this->internal;
+    }
+
+    public function setSocialCache($cache): void
+    {
+        $this->socialCache = $cache;
+    }
+
+    /**
+     * @return array<mixed>
+     */
+    public function getSocialCache()
+    {
+        return $this->socialCache;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getColor()
+    {
+        return $this->color;
+    }
+
+    /**
+     * @param mixed $color
+     */
+    public function setColor($color): void
+    {
+        $this->color = $color;
+    }
+
+    public function isAnonymous(): bool
+    {
+        return !($this->getName()
+            || $this->firstname
+            || $this->lastname
+            || $this->company
+            || $this->email
+            || $this->getFirstSocialIdentity()
+        );
+    }
+
+    public function wasAnonymous(): bool
+    {
+        return null == $this->dateIdentified && false === $this->isAnonymous();
+    }
+
+    /**
+     * @return bool
+     */
+    protected function getFirstSocialIdentity()
+    {
+        if (isset($this->fields['social'])) {
+            foreach ($this->fields['social'] as $social) {
+                if (!empty($social['value'])) {
+                    return $social['value'];
+                }
+            }
+        } elseif (!empty($this->updatedFields)) {
+            foreach ($this->availableSocialFields as $social) {
+                if (!empty($this->updatedFields[$social])) {
+                    return $this->updatedFields[$social];
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public function setManipulator(?LeadManipulator $manipulator = null): static
+    {
+        $this->manipulator = $manipulator;
+
+        return $this;
+    }
+
+    /**
+     * @return LeadManipulator|null
+     */
+    public function getManipulator()
+    {
+        return $this->manipulator;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isNewlyCreated()
+    {
+        return $this->newlyCreated;
+    }
+
+    /**
+     * @param bool $newlyCreated Created
+     */
+    public function setNewlyCreated($newlyCreated): void
+    {
+        $this->newlyCreated = $newlyCreated;
+    }
+
+    /**
+     * @return Collection<int, LeadNote>
+     */
+    public function getNotes()
+    {
+        return $this->notes;
+    }
+
+    /**
+     * @param string $source
+     */
+    public function setPreferredProfileImage($source): void
+    {
+        $this->preferredProfileImage = $source;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getPreferredProfileImage()
+    {
+        return $this->preferredProfileImage;
+    }
+
+    /**
+     * @return \DateTimeInterface|null
+     */
+    public function getDateIdentified()
+    {
+        return $this->dateIdentified;
+    }
+
+    /**
+     * @param mixed $dateIdentified
+     */
+    public function setDateIdentified($dateIdentified): void
+    {
+        $this->isChanged('dateIdentified', $dateIdentified);
+        $this->dateIdentified = $dateIdentified;
+    }
+
+    /**
+     * @return \DateTimeInterface|null
+     */
+    public function getLastActive()
+    {
+        return $this->lastActive;
+    }
+
+    /**
+     * @param mixed $lastActive
+     */
+    public function setLastActive($lastActive): void
+    {
+        $this->changes['dateLastActive'] = [$this->lastActive, $lastActive];
+        $this->lastActive                = $lastActive;
+    }
+
+    public function setAvailableSocialFields(array $availableSocialFields): void
+    {
+        $this->availableSocialFields = $availableSocialFields;
+    }
+
+    public function addTag(Tag $tag): static
+    {
+        $this->isChanged('tags', $tag);
+        $this->tags[$tag->getTag()] = $tag;
+
+        return $this;
+    }
+
+    public function removeTag(Tag $tag): void
+    {
+        $this->isChanged('tags', $tag->getTag());
+        $this->tags->removeElement($tag);
+    }
+
+    /**
+     * @return Collection<string, Tag>
+     */
+    public function getTags()
+    {
+        return $this->tags;
+    }
+
+    public function setTags($tags): static
+    {
+        $this->tags = $tags;
+
+        return $this;
+    }
+
+    /**
+     * @return Collection<int, UtmTag>
+     */
+    public function getUtmTags()
+    {
+        return $this->utmtags;
+    }
+
+    public function setUtmTags($utmTags): static
+    {
+        $this->isChanged('utmtags', $utmTags);
+        $this->utmtags[] = $utmTags;
+
+        return $this;
+    }
+
+    public function removeUtmTagEntry(UtmTag $utmTag): void
+    {
+        $this->changes['utmtags'] = ['removed', 'UtmTagID:'.$utmTag->getId()];
+        $this->utmtags->removeElement($utmTag);
+    }
+
+    public function setStage(?Stage $stage = null): static
+    {
+        $this->isChanged('stage', $stage);
+        $this->stage = $stage;
+
+        return $this;
+    }
+
+    /**
+     * @return Stage|null
+     */
+    public function getStage()
+    {
+        return $this->stage;
+    }
+
+    /**
+     * @param FrequencyRule[] $frequencyRules
+     */
+    public function setFrequencyRules($frequencyRules): static
+    {
+        $this->frequencyRules = new ArrayCollection($frequencyRules);
+
+        return $this;
+    }
+
+    /**
+     * @return Collection<int, FrequencyRule>
+     */
+    public function getFrequencyRules()
+    {
+        return $this->frequencyRules;
+    }
+
+    public function removeFrequencyRule(FrequencyRule $frequencyRule): void
+    {
+        $this->isChanged('frequencyRules', $frequencyRule->getId(), false);
+        $this->frequencyRules->removeElement($frequencyRule);
+    }
+
+    public function addFrequencyRule(FrequencyRule $frequencyRule): void
+    {
+        $this->isChanged('frequencyRules', $frequencyRule, false);
+        $this->frequencyRules[] = $frequencyRule;
+    }
+
+    /**
+     * Get attribution value.
+     */
+    public function getAttribution(): float
+    {
+        return (float) $this->getFieldValue('attribution');
+    }
+
+    /**
+     * If there is an attribution amount but no date, insert today's date.
+     */
+    public function checkAttributionDate(): void
+    {
+        $attribution     = $this->getFieldValue('attribution');
+        $attributionDate = $this->getFieldValue('attribution_date');
+
+        if (!empty($attribution) && empty($attributionDate)) {
+            $this->addUpdatedField('attribution_date', (new \DateTime())->format('Y-m-d'));
+        } elseif (empty($attribution) && !empty($attributionDate)) {
+            $this->addUpdatedField('attribution_date', null);
+        }
+    }
+
+    /**
+     * Set date identified.
+     */
+    public function checkDateIdentified(): void
+    {
+        if ($this->wasAnonymous()) {
+            $this->dateIdentified            = new \DateTime();
+            $this->changes['dateIdentified'] = ['', $this->dateIdentified];
+        }
+    }
+
+    /**
+     * Set date added if not already set.
+     */
+    public function checkDateAdded(): void
+    {
+        if (null === $this->getDateAdded()) {
+            $this->setDateAdded(new \DateTime());
+        }
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getPrimaryCompany()
+    {
+        return $this->primaryCompany;
+    }
+
+    /**
+     * @param mixed $primaryCompany
+     */
+    public function setPrimaryCompany($primaryCompany): static
+    {
+        $this->primaryCompany = $primaryCompany;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getTitle()
+    {
+        return $this->title;
+    }
+
+    /**
+     * @param mixed $title
+     */
+    public function setTitle($title): static
+    {
+        $this->isChanged('title', $title);
+        $this->title = $title;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getFirstname()
+    {
+        return $this->firstname;
+    }
+
+    /**
+     * @param mixed $firstname
+     */
+    public function setFirstname($firstname): static
+    {
+        $this->isChanged('firstname', $firstname);
+        $this->firstname = $firstname;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getLastname()
+    {
+        return $this->lastname;
+    }
+
+    /**
+     * @param mixed $lastname
+     */
+    public function setLastname($lastname): static
+    {
+        $this->isChanged('lastname', $lastname);
+        $this->lastname = $lastname;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getPosition()
+    {
+        return $this->position;
+    }
+
+    /**
+     * @param mixed $position
+     */
+    public function setPosition($position): static
+    {
+        $this->isChanged('position', $position);
+        $this->position = $position;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getPhone()
+    {
+        return $this->phone;
+    }
+
+    /**
+     * @param mixed $phone
+     */
+    public function setPhone($phone): static
+    {
+        $this->isChanged('phone', $phone);
+        $this->phone = $phone;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getMobile()
+    {
+        return $this->mobile;
+    }
+
+    /**
+     * @param mixed $mobile
+     */
+    public function setMobile($mobile): static
+    {
+        $this->isChanged('mobile', $mobile);
+        $this->mobile = $mobile;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getLeadPhoneNumber()
+    {
+        return $this->mobile ?: $this->phone;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getAddress1()
+    {
+        return $this->address1;
+    }
+
+    /**
+     * @param mixed $address1
+     */
+    public function setAddress1($address1): static
+    {
+        $this->isChanged('address1', $address1);
+        $this->address1 = $address1;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getAddress2()
+    {
+        return $this->address2;
+    }
+
+    /**
+     * @param mixed $address2
+     */
+    public function setAddress2($address2): static
+    {
+        $this->isChanged('address2', $address2);
+        $this->address2 = $address2;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getCity()
+    {
+        return $this->city;
+    }
+
+    /**
+     * @param mixed $city
+     */
+    public function setCity($city): static
+    {
+        $this->isChanged('city', $city);
+        $this->city = $city;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getState()
+    {
+        return $this->state;
+    }
+
+    /**
+     * @param mixed $state
+     */
+    public function setState($state): static
+    {
+        $this->isChanged('state', $state);
+        $this->state = $state;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getZipcode()
+    {
+        return $this->zipcode;
+    }
+
+    /**
+     * @param mixed $zipcode
+     */
+    public function setZipcode($zipcode): static
+    {
+        $this->isChanged('zipcode', $zipcode);
+        $this->zipcode = $zipcode;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getTimezone()
+    {
+        return $this->timezone;
+    }
+
+    /**
+     * @param string $timezone
+     */
+    public function setTimezone($timezone): static
+    {
+        $this->isChanged('timezone', $timezone);
+        $this->timezone = $timezone;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getCountry()
+    {
+        return $this->country;
+    }
+
+    /**
+     * @param mixed $country
+     */
+    public function setCountry($country): static
+    {
+        $this->isChanged('country', $country);
+        $this->country = $country;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getCompany()
+    {
+        return $this->company;
+    }
+
+    /**
+     * @param mixed $company
+     */
+    public function setCompany($company): static
+    {
+        $this->isChanged('company', $company);
+        $this->company = $company;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getEmail()
+    {
+        return $this->email;
+    }
+
+    /**
+     * @param mixed $email
+     */
+    public function setEmail($email): static
+    {
+        $this->isChanged('email', $email);
+        $this->email = $email;
+
+        return $this;
+    }
+
+    /**
+     * Returns array of rules with preferred channels first.
+     *
+     * @return array<mixed>
+     */
+    public function getChannelRules()
+    {
+        if (null === $this->channelRules) {
+            $frequencyRules = $this->frequencyRules->toArray();
+            $dnc            = $this->doNotContact;
+            $dncChannels    = [];
+            /** @var DoNotContact $record */
+            foreach ($dnc as $record) {
+                $dncChannels[$record->getChannel()] = $record->getReason();
+            }
+
+            $this->channelRules = self::generateChannelRules($frequencyRules, $dncChannels);
+        }
+
+        return $this->channelRules;
+    }
+
+    public function setChannelRules(array $rules): static
+    {
+        $this->channelRules = $rules;
+
+        return $this;
+    }
+
+    /**
+     * Used mostly when batching to generate preferred channels without hydrating associations one at a time.
+     *
+     * @return array<mixed, array<'dnc'|'frequency', mixed>>
+     */
+    public static function generateChannelRules(array $frequencyRules, array $dncRules): array
+    {
+        $rules             = [];
+        $dncFrequencyRules = [];
+        foreach ($frequencyRules as $rule) {
+            if ($rule instanceof FrequencyRule) {
+                $ruleArray = [
+                    'channel'           => $rule->getChannel(),
+                    'pause_from_date'   => $rule->getPauseFromDate(),
+                    'pause_to_date'     => $rule->getPauseToDate(),
+                    'preferred_channel' => $rule->getPreferredChannel(),
+                    'frequency_time'    => $rule->getFrequencyTime(),
+                    'frequency_number'  => $rule->getFrequencyNumber(),
+                ];
+
+                if (array_key_exists($rule->getChannel(), $dncRules)) {
+                    $dncFrequencyRules[$rule->getChannel()] = $ruleArray;
+                } else {
+                    $rules[$rule->getChannel()] = $ruleArray;
+                }
+            } else {
+                // Already an array
+                break;
+            }
+        }
+
+        if (count($rules)) {
+            $frequencyRules = $rules;
+        }
+
+        /** @var FrequencyRule $rule */
+        usort(
+            $frequencyRules,
+            function (array $a, array $b): int {
+                if ($a['pause_from_date'] && $a['pause_to_date']) {
+                    $now = new \DateTime();
+                    if ($now >= $a['pause_from_date'] && $now <= $a['pause_to_date']) {
+                        // A is paused so give lower preference
+                        return 1;
+                    }
+                }
+
+                if ($a['preferred_channel'] === $b['preferred_channel']) {
+                    if (!$a['frequency_time'] || !$b['frequency_time'] || !$a['frequency_number'] || !$b['frequency_number']) {
+                        return 0;
+                    }
+
+                    // Order by which ever can be sent more frequent
+                    if ($a['frequency_time'] === $b['frequency_time']) {
+                        if ($a['frequency_number'] === $b['frequency_number']) {
+                            return 0;
+                        }
+
+                        return ($a['frequency_number'] > $b['frequency_number']) ? -1 : 1;
+                    }
+                    $convertToMonth = fn ($number, $unit) => match ($unit) {
+                        FrequencyRule::TIME_MONTH => (int) $number,
+                        FrequencyRule::TIME_WEEK  => $number * 4,
+                        FrequencyRule::TIME_DAY   => $number * 30,
+                        default                   => $number,
+                    };
+
+                    $aFrequency = $convertToMonth($a['frequency_number'], $a['frequency_time']);
+                    $bFrequency = $convertToMonth($b['frequency_number'], $b['frequency_time']);
+
+                    return $bFrequency <=> $aFrequency;
+                }
+
+                return ($a['preferred_channel'] > $b['preferred_channel']) ? -1 : 1;
+            }
+        );
+
+        $rules = [];
+        foreach ($frequencyRules as $rule) {
+            $rules[$rule['channel']] = [
+                'frequency' => $rule,
+                'dnc'       => DoNotContact::IS_CONTACTABLE,
+            ];
+        }
+
+        if (count($dncRules)) {
+            foreach ($dncRules as $channel => $reason) {
+                $rules[$channel] = [
+                    'frequency' => $dncFrequencyRules[$channel] ?? null,
+                    'dnc'       => $reason,
+                ];
+            }
+        }
+
+        return $rules;
+    }
+
+    public function setPreviousId(int $id): void
+    {
+        $this->previousId = $id;
+    }
+
+    public function getPreviousId(): int
+    {
+        return $this->previousId;
+    }
+
+    /**
+     * @return ArrayCollection<int,GroupContactScore>
+     */
+    public function getGroupScores(): Collection
+    {
+        return $this->groupScores;
+    }
+
+    public function getGroupScore(Group $group): ?GroupContactScore
+    {
+        foreach ($this->groupScores as $groupScore) {
+            if ($groupScore->getGroup() === $group) {
+                return $groupScore;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param ArrayCollection<int,GroupContactScore> $groupScores
+     */
+    public function setGroupScores($groupScores): void
+    {
+        $this->groupScores = $groupScores;
+    }
+
+    public function addGroupScore(GroupContactScore $groupContactScore): self
+    {
+        $this->groupScores[] = $groupContactScore;
+
+        return $this;
+    }
+
+    public function removeGroupScore(GroupContactScore $groupContactScore): void
+    {
+        $this->groupScores->removeElement($groupContactScore);
+    }
+
+    /**
+     * Do not update modified_by and date_modified fields if only DNC or manipulator was changed.
+     * Avoid unnecessary update queries.
+     */
+    public function shouldSkipSettingModifiedProperties(): bool
+    {
+        $changes = $this->changes;
+
+        unset($changes['dnc_channel_status']);
+        unset($changes['manipulator']);
+
+        return !(bool) count($changes);
+    }
+}

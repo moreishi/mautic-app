@@ -1,0 +1,75 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\CoreBundle\Event;
+
+use Symfony\Contracts\EventDispatcher\Event;
+
+final class DetermineWinnerEvent extends Event
+{
+    /**
+     * @var array{
+     *             winners: array<int, int|string>,
+     *             support?: mixed,
+     *             basedOn?: string,
+     *             supportTemplate?: string
+     *             }
+     */
+    private ?array $abTestResults = null;
+
+    /**
+     * @param array{
+     *   parent?: \Mautic\CoreBundle\Entity\VariantEntityInterface|mixed,
+     *   children?: array<mixed>,
+     *   page?: \Mautic\PageBundle\Entity\Page,
+     *   email?: \Mautic\EmailBundle\Entity\Email|\Mautic\CoreBundle\Entity\VariantEntityInterface
+     * } $parameters
+     */
+    public function __construct(
+        private readonly array $parameters,
+    ) {
+    }
+
+    /**
+     * @return array{
+     *                parent?: \Mautic\CoreBundle\Entity\VariantEntityInterface|mixed,
+     *                children?: array<mixed>,
+     *                page?: \Mautic\PageBundle\Entity\Page,
+     *                email?: \Mautic\EmailBundle\Entity\Email|\Mautic\CoreBundle\Entity\VariantEntityInterface
+     *                }
+     */
+    public function getParameters(): array
+    {
+        return $this->parameters;
+    }
+
+    /**
+     * @return array{
+     *                winners: array<int, int|string>,
+     *                support?: mixed,
+     *                basedOn?: string,
+     *                supportTemplate?: string
+     *                }
+     */
+    public function getAbTestResults(): ?array
+    {
+        return $this->abTestResults;
+    }
+
+    /**
+     * @param array{
+     *   winners: array<int, int|string>,
+     *   support?: mixed,
+     *   basedOn?: string,
+     *   supportTemplate?: string
+     * } $abTestResults The following parameters are available:
+     * - (required) winners - Array of IDs of the winners (empty array in case of a tie)
+     * - (optional) support - Data passed to the view defined by supportTemplate below in order to render visual support for the winners (such as a graph, etc)
+     * - (optional) supportTemplate - View notation to render content for the A/B stats modal. For example, `HelloWorldBundle:SubscribedEvents\AbTest:graph.html.twig`
+     */
+    public function setAbTestResults(array $abTestResults): void
+    {
+        $this->abTestResults = $abTestResults;
+    }
+}

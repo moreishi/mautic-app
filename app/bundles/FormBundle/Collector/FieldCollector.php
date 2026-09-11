@@ -1,0 +1,45 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\FormBundle\Collector;
+
+use Mautic\FormBundle\Collection\FieldCollection;
+use Mautic\FormBundle\Event\FieldCollectEvent;
+use Mautic\FormBundle\FormEvents;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use Symfony\Contracts\Service\ResetInterface;
+
+final class FieldCollector implements FieldCollectorInterface, ResetInterface
+{
+    /**
+     * @var FieldCollection[]
+     */
+    private array $fieldCollections = [];
+
+    public function __construct(
+        private readonly EventDispatcherInterface $dispatcher,
+    ) {
+    }
+
+    public function getFields(string $object): FieldCollection
+    {
+        if (!isset($this->fieldCollections[$object])) {
+            $this->collect($object);
+        }
+
+        return $this->fieldCollections[$object];
+    }
+
+    public function reset(): void
+    {
+        $this->fieldCollections = [];
+    }
+
+    private function collect(string $object): void
+    {
+        $event = new FieldCollectEvent($object);
+        $this->dispatcher->dispatch($event, FormEvents::ON_FIELD_COLLECT);
+        $this->fieldCollections[$object] = $event->getFields();
+    }
+}

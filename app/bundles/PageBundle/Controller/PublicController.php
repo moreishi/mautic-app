@@ -1,0 +1,596 @@
+<?php
+
+namespace Mautic\PageBundle\Controller;
+
+use Mautic\CoreBundle\Controller\AbstractFormController;
+use Mautic\CoreBundle\Exception\FileNotFoundException;
+use Mautic\CoreBundle\Exception\InvalidDecodedStringException;
+use Mautic\CoreBundle\Helper\ClickthroughHelper;
+use Mautic\CoreBundle\Helper\CookieHelper;
+use Mautic\CoreBundle\Helper\IpLookupHelper;
+use Mautic\CoreBundle\Helper\ThemeHelper;
+use Mautic\CoreBundle\Helper\TrackingPixelHelper;
+use Mautic\CoreBundle\Helper\UrlHelper;
+use Mautic\CoreBundle\Security\Permissions\CorePermissions;
+use Mautic\CoreBundle\Twig\Helper\AnalyticsHelper;
+use Mautic\CoreBundle\Twig\Helper\AssetsHelper;
+use Mautic\LeadBundle\Entity\Lead;
+use Mautic\LeadBundle\Helper\ContactRequestHelper;
+use Mautic\LeadBundle\Model\LeadModel;
+use Mautic\LeadBundle\Tracker\ContactTracker;
+use Mautic\LeadBundle\Tracker\Service\DeviceTrackingService\DeviceTrackingServiceInterface;
+use Mautic\PageBundle\Entity\Page;
+use Mautic\PageBundle\Event\PageDisplayEvent;
+use Mautic\PageBundle\Event\TrackingEvent;
+use Mautic\PageBundle\Event\UrlTokenReplaceEvent;
+use Mautic\PageBundle\Helper\PageConfig;
+use Mautic\PageBundle\Helper\TrackingHelper;
+use Mautic\PageBundle\Model\PageModel;
+use Mautic\PageBundle\Model\RedirectModel;
+use Mautic\PageBundle\Model\Tracking404Model;
+use Mautic\PageBundle\Model\VideoModel;
+use Mautic\PageBundle\PageEvents;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\Cookie;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
+use Symfony\Component\Routing\RouterInterface;
+
+final class PublicController extends AbstractFormController
+{
+    /**
+     * @param string $slug
+     *
+     * @throws \Exception
+     * @throws FileNotFoundException
+     */
+    public function indexAction(
+        Request $request,
+        ContactRequestHelper $contactRequestHelper,
+        CookieHelper $cookieHelper,
+        AnalyticsHelper $analyticsHelper,
+        AssetsHelper $assetsHelper,
+        ThemeHelper $themeHelper,
+        Tracking404Model $tracking404Model,
+        RouterInterface $router,
+        DeviceTrackingServiceInterface $deviceTrackingService,
+        PageModel $model,
+        $slug): RedirectResponse|Response
+    {
+        /** @var Page|bool $entity */
+        $entity = $model->getEntityBySlugs($slug);
+
+        // Do not hit preference center pages
+        if (!empty($entity) && !$entity->getIsPreferenceCenter()) {
+            $userAccess = $this->security->hasEntityAccess('page:pages:viewown', 'page:pages:viewother', $entity->getCreatedBy());
+            $published  = $entity->isPublished();
+
+            // Make sure the page is published or deny access if not
+            if (!$published && !$userAccess) {
+                // If the page has a redirect type, handle it
+                if (null != $entity->getRedirectType()) {
+                    $model->hitPage($entity, $request, $entity->getRedirectType());
+
+                    if ($entity->getRedirectUrl()) {
+                        return $this->redirect($entity->getRedirectUrl(), (int) $entity->getRedirectType());
+                    }
+
+                    return $this->notFound();
+                }
+                $model->hitPage($entity, $request, 401);
+
+                $this->throwAccessDenied();
+            }
+
+            $lead  = null;
+            $query = null;
+            if (!$userAccess) {
+                // Extract the lead from the request so it can be used to determine language if applicable
+                $query = $model->getHitQuery($request, $entity);
+                $lead  = $contactRequestHelper->getContactFromQuery($query);
+            }
+
+            // Correct the URL if it doesn't match up
+            if (!$request->attributes->get('ignore_mismatch', 0)) {
+                // Make sure URLs match up
+                $url        = $model->generateUrl($entity, false);
+                $requestUri = $request->getRequestUri();
+
+                // Remove query when comparing
+                $query = $request->getQueryString();
+                if (!empty($query)) {
+                    $requestUri = str_replace("?{$query}", '', $url);
+                }
+
+                // Redirect if they don't match
+                if ($requestUri != $url) {
+                    $model->hitPage($entity, $request, 301, $lead, $query);
+
+                    return $this->redirect($url, 301);
+                }
+            }
+
+            // Check for variants
+            [$parentVariant, $childrenVariants] = $entity->getVariants();
+
+            // Is this a variant of another? If so, the parent URL should be used unless a user is logged in and previewing
+            if ($parentVariant != $entity && !$userAccess) {
+                $model->hitPage($entity, $request, 301, $lead, $query);
+                $url = $model->generateUrl($parentVariant, false);
+
+                return $this->redirect($url, 301);
+            }
+
+            // First determine the A/B test to display if applicable
+            if (!$userAccess) {
+                // Check to see if a variant should be shown versus the parent but ignore if a user is previewing
+                if (count($childrenVariants)) {
+                    $variants      = [];
+                    $variantWeight = 0;
+                    $totalHits     = $entity->getVariantHits();
+
+                    foreach ($childrenVariants as $id => $child) {
+                        if ($child->isPublished()) {
+                            $variantSettings = $child->getVariantSettings();
+                            $variants[$id]   = [
+                                'weight' => ($variantSettings['weight'] / 100),
+                                'hits'   => $child->getVariantHits(),
+                            ];
+                            $variantWeight += $variantSettings['weight'];
+
+                            // Count translations for this variant as well
+                            $translations = $child->getTranslations(true);
+                            /** @var Page $translation */
+                            foreach ($translations as $translation) {
+                                if ($translation->isPublished()) {
+                                    $variants[$id]['hits'] += (int) $translation->getVariantHits();
+                                }
+                            }
+
+                            $totalHits += $variants[$id]['hits'];
+                        }
+                    }
+
+                    if (count($variants)) {
+                        // check to see if this user has already been displayed a specific variant
+                        $variantCookie = $request->cookies->get('mautic_page_'.$entity->getId());
+
+                        if (!empty($variantCookie)) {
+                            if (isset($variants[$variantCookie])) {
+                                // if not the parent, show the specific variant already displayed to the visitor
+                                if ((string) $variantCookie !== (string) $entity->getId()) {
+                                    $entity = $childrenVariants[$variantCookie];
+                                } // otherwise proceed with displaying parent
+                            }
+                        } else {
+                            // Add parent weight
+                            $variants[$entity->getId()] = [
+                                'weight' => ((100 - $variantWeight) / 100),
+                                'hits'   => $entity->getVariantHits(),
+                            ];
+
+                            // Count translations for the parent as well
+                            $translations = $entity->getTranslations(true);
+                            /** @var Page $translation */
+                            foreach ($translations as $translation) {
+                                if ($translation->isPublished()) {
+                                    $variants[$entity->getId()]['hits'] += (int) $translation->getVariantHits();
+                                }
+                            }
+                            $totalHits += $variants[$id]['hits'];
+
+                            // determine variant to show
+                            foreach ($variants as &$variant) {
+                                $variant['weight_deficit'] = ($totalHits) ? $variant['weight'] - ($variant['hits'] / $totalHits) : $variant['weight'];
+                            }
+
+                            // Reorder according to send_weight so that campaigns which currently send one at a time alternate
+                            uasort(
+                                $variants,
+                                function (array $a, array $b): int {
+                                    if ($a['weight_deficit'] === $b['weight_deficit']) {
+                                        if ($a['hits'] === $b['hits']) {
+                                            return 0;
+                                        }
+
+                                        // if weight is the same - sort by least number displayed
+                                        return ($a['hits'] < $b['hits']) ? -1 : 1;
+                                    }
+
+                                    // sort by the one with the greatest deficit first
+                                    return ($a['weight_deficit'] > $b['weight_deficit']) ? -1 : 1;
+                                }
+                            );
+
+                            // find the one with the most difference from weight
+                            $useId = array_key_first($variants);
+
+                            // set the cookie - 14 days
+                            $cookieHelper->setCookie(
+                                'mautic_page_'.$entity->getId(),
+                                $useId,
+                                3600 * 24 * 14
+                            );
+
+                            if ($useId != $entity->getId()) {
+                                $entity = $childrenVariants[$useId];
+                            }
+                        }
+                    }
+                }
+
+                // Now show the translation for the page or a/b test - only fetch a translation if a slug was not used
+                if ($entity->isTranslation() && empty($entity->languageSlug)) {
+                    [$translationParent, $translatedEntity] = $model->getTranslatedEntity(
+                        $entity,
+                        $lead,
+                        $request
+                    );
+                    \assert($translatedEntity instanceof Page);
+
+                    if ($translatedEntity !== $entity) {
+                        if (!$request->get('ntrd', 0)) {
+                            $url = $model->generateUrl($translatedEntity, false);
+                            $model->hitPage($entity, $request, 302, $lead, $query);
+
+                            return $this->redirect($url, 302);
+                        }
+                    }
+                }
+            }
+
+            // Generate contents
+            $analytics = $analyticsHelper->getCode();
+
+            $BCcontent = $entity->getContent();
+            $content   = $entity->getCustomHtml();
+            // This condition remains so the Mautic v1 themes would display the content
+            if (empty($content) && !empty($BCcontent)) {
+                /**
+                 * @deprecated  BC support to be removed in 3.0
+                 */
+                $template = $entity->getTemplate();
+                // all the checks pass so display the content
+                $content = $entity->getContent();
+
+                // Add the GA code to the template assets
+                if (!empty($analytics)) {
+                    $assetsHelper->addCustomDeclaration($analytics);
+                }
+
+                $logicalName = $themeHelper->checkForTwigTemplate('@themes/'.$template.'/html/page.html.twig');
+
+                $content = $themeHelper->renderThemeTemplate(
+                    $logicalName,
+                    [
+                        'content'  => $content,
+                        'page'     => $entity,
+                        'template' => $template,
+                        'public'   => true,
+                    ]
+                );
+            } else {
+                if (!empty($analytics)) {
+                    $content = str_replace('</head>', $analytics."\n</head>", $content);
+                }
+                if ($entity->getNoIndex()) {
+                    $content = str_replace('</head>', "<meta name=\"robots\" content=\"noindex\">\n</head>", $content);
+                }
+            }
+
+            $assetsHelper->addScript(
+                $router->generate('mautic_js', [], UrlGeneratorInterface::ABSOLUTE_URL),
+                'onPageDisplay_headClose',
+                true,
+                'mautic_js'
+            );
+
+            $event = new PageDisplayEvent((string) $content, $entity);
+            $this->dispatcher->dispatch($event, PageEvents::PAGE_ON_DISPLAY);
+            $content = $event->getContent();
+
+            $isHitTrackable = $model->hitPage($entity, $request, Response::HTTP_OK, $lead, $query);
+
+            $response = new Response($content);
+            if (!$isHitTrackable || $request->cookies->has('Blocked-Tracking')) {
+                $deviceTrackingService->clearTrackingCookies();
+            }
+
+            return $response;
+        }
+
+        if (false !== $entity && $tracking404Model->isTrackable()) {
+            $tracking404Model->hitPage($entity, $request);
+        }
+
+        return $this->notFound();
+    }
+
+    /**
+     * @throws FileNotFoundException
+     */
+    public function previewAction(Request $request, PageConfig $pageConfig, CorePermissions $security, AnalyticsHelper $analyticsHelper, AssetsHelper $assetsHelper, ThemeHelper $themeHelper, PageModel $model, LeadModel $leadModel, int $id, ?string $objectType = null): Response
+    {
+        $page = $model->getEntity($id);
+
+        if (!$page || !$page->getId()) {
+            return $this->notFound();
+        }
+
+        $contactId = (int) $request->query->get('contactId');
+        if ($contactId) {
+            $contact = $leadModel->getEntity($contactId);
+        }
+        $draftEnabled = $pageConfig->isDraftEnabled();
+        $analytics    = $analyticsHelper->getCode();
+
+        $BCcontent     = $page->getContent();
+        $content       = $page->getCustomHtml();
+        $publicPreview = $page->isPublicPreview();
+
+        if ('draft' === $objectType && $draftEnabled && $page->hasDraft()) {
+            $content       = $page->getDraftContent();
+            $publicPreview = $page->getDraft()->isPublicPreview();
+        }
+
+        if (($security->isAnonymous() && (!$page->isPublished() || !$publicPreview)) || (!$security->isAnonymous(
+        ) && !$security->hasEntityAccess(
+            'page:pages:viewown',
+            'page:pages:viewother',
+            $page->getCreatedBy()
+        ))) {
+            $this->throwAccessDenied();
+        }
+
+        if ($contactId && (!$security->isAdmin() || !$security->hasEntityAccess(
+            'lead:leads:viewown',
+            'lead:leads:viewother'
+        ))) {
+            // disallow displaying contact information
+            $this->throwAccessDenied();
+        }
+
+        if (empty($content) && !empty($BCcontent)) {
+            $template = $page->getTemplate();
+            // all the checks pass so display the content
+            $content = $page->getContent();
+
+            // Add the GA code to the template assets
+            if (!empty($analytics)) {
+                $assetsHelper->addCustomDeclaration($analytics);
+            }
+
+            $logicalName = $themeHelper->checkForTwigTemplate('@themes/'.$template.'/html/page.html.twig');
+
+            $content = $themeHelper->renderThemeTemplate(
+                $logicalName,
+                [
+                    'content'  => $content,
+                    'page'     => $page,
+                    'template' => $template,
+                    'public'   => true, // @deprecated Remove in 2.0
+                ]
+            );
+        } else {
+            $content = str_replace('</head>', $analytics."\n</head>", $content);
+        }
+
+        if ($this->dispatcher->hasListeners(PageEvents::PAGE_ON_DISPLAY)) {
+            $event = new PageDisplayEvent($content, $page, $this->getPreferenceCenterConfig());
+            if (isset($contact) && $contact instanceof Lead) {
+                $event->setLead($contact);
+            }
+            $this->dispatcher->dispatch($event, PageEvents::PAGE_ON_DISPLAY);
+            $content = $event->getContent();
+        }
+
+        return new Response($content);
+    }
+
+    public function trackingImageAction(Request $request, PageModel $model): Response
+    {
+        $model->hitPage(null, $request);
+
+        return TrackingPixelHelper::getResponse($request);
+    }
+
+    public function trackingAction(
+        Request $request,
+        DeviceTrackingServiceInterface $deviceTrackingService,
+        TrackingHelper $trackingHelper,
+        ContactTracker $contactTracker,
+        PageModel $model,
+    ): JsonResponse {
+        $notSuccessResponse = new JsonResponse(
+            [
+                'success' => 0,
+            ]
+        );
+        if (!$this->security->isAnonymous()) {
+            return $notSuccessResponse;
+        }
+
+        try {
+            $model->hitPage(null, $request);
+        } catch (InvalidDecodedStringException) {
+            // do not track invalid ct
+            return $notSuccessResponse;
+        }
+
+        $lead          = $contactTracker->getContact();
+        $trackedDevice = $deviceTrackingService->getTrackedDevice();
+        $trackingId    = (null === $trackedDevice ? null : $trackedDevice->getTrackingId());
+
+        $sessionValue   = $trackingHelper->getCacheItem(true);
+
+        $event = new TrackingEvent($lead, $request, $sessionValue);
+        $this->dispatcher->dispatch($event, PageEvents::ON_CONTACT_TRACKED);
+
+        return new JsonResponse(
+            [
+                'success'   => 1,
+                'id'        => ($lead) ? $lead->getId() : null,
+                'sid'       => $trackingId,
+                'device_id' => $trackingId,
+                'events'    => $event->getResponse()->all(),
+            ]
+        );
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function redirectAction(
+        Request $request,
+        ContactRequestHelper $contactRequestHelper,
+        IpLookupHelper $ipLookupHelper,
+        LoggerInterface $logger,
+        RedirectModel $redirectModel,
+        PageModel $pageModel,
+        $redirectId,
+    ): RedirectResponse {
+        $logger->debug('Attempting to load redirect with tracking_id of: '.$redirectId);
+
+        $redirect = $redirectModel->getRedirectById($redirectId);
+
+        $logger->debug('Executing Redirect: '.$redirect);
+
+        if (null === $redirect || !$redirect->isPublished(false)) {
+            $logger->debug('Redirect with tracking_id of '.$redirectId.' not found');
+
+            $url = ($redirect) ? $redirect->getUrl() : 'n/a';
+
+            throw $this->createNotFoundException($this->translator->trans('mautic.core.url.error.404', ['%url%' => $url]));
+        }
+
+        // Ensure the URL does not have encoded ampersands
+        $url = UrlHelper::decodeAmpersands($redirect->getUrl());
+
+        // Get query string
+        $query = $request->query->all();
+
+        $ct = null;
+        // Remove click-trough parameter, so it won't be duplicated later.
+        if (isset($query['ct'])) {
+            $ct = $query['ct'];
+            unset($query['ct']);
+        }
+
+        // Tak on anything left to the URL
+        if (count($query)) {
+            $url = UrlHelper::appendQueryToUrl($url, http_build_query($query));
+        }
+
+        // If the IP address is not trackable, it means it came form a configured "do not track" IP or a "do not track" user agent
+        // This prevents simulated clicks from 3rd party services such as URL shorteners from simulating clicks
+        $ipAddress = $ipLookupHelper->getIpAddress();
+
+        $isHitTrackable = false;
+        if (null !== $ct && '' !== $ct) {
+            if ($ipAddress->isTrackable()) {
+                // Search replace lead fields in the URL
+                try {
+                    $lead           = $contactRequestHelper->getContactFromQuery(['ct' => $ct]);
+                    $isHitTrackable = $pageModel->hitPage($redirect, $request, 200, $lead);
+                } catch (InvalidDecodedStringException $e) {
+                    // Invalid ct value so we must unset it
+                    // and process the request without it
+
+                    $logger->warning(sprintf('Invalid clickthrough value: %s', $ct), ['exception' => $e]);
+
+                    $request->request->remove('ct');
+                    $request->query->remove('ct');
+                    $lead           = $contactRequestHelper->getContactFromQuery();
+                    $isHitTrackable = $pageModel->hitPage($redirect, $request, 200, $lead);
+                }
+
+                if ($lead) {
+                    try {
+                        $emailId = (int) (ClickthroughHelper::decodeArrayFromUrl($ct)['email'] ?? null);
+                    } catch (InvalidDecodedStringException) {
+                        $emailId = null;
+                    }
+
+                    $urlEvent = new UrlTokenReplaceEvent($url, $lead, $emailId ?: null);
+                    $this->dispatcher->dispatch($urlEvent);
+                    $url = $urlEvent->getContent();
+                }
+            }
+
+            if (str_contains($url, $this->generateUrl('mautic_asset_download'))) {
+                if (str_contains($url, '?')) {
+                    $url .= '&ct='.$ct;
+                } else {
+                    $url .= '?ct='.$ct;
+                }
+            }
+        }
+
+        $url = UrlHelper::sanitizeAbsoluteUrl($url);
+
+        if (!UrlHelper::isValidUrl($url)) {
+            throw $this->createNotFoundException($this->translator->trans('mautic.core.url.error.404', ['%url%' => $url]));
+        }
+
+        $response =  $this->redirect($url);
+        $response->headers->setCookie(new Cookie('Blocked-Tracking', (string) !$isHitTrackable, strtotime('now + 15 seconds')));
+
+        return $response;
+    }
+
+    /**
+     * Track video views.
+     */
+    public function hitVideoAction(Request $request, VideoModel $model): JsonResponse|Response
+    {
+        // Only track XMLHttpRequests, because the hit should only come from there
+        if ($request->isXmlHttpRequest()) {
+            try {
+                $model->hitVideo($request);
+            } catch (\Exception) {
+                return new JsonResponse(['success' => false]);
+            }
+
+            return new JsonResponse(['success' => true]);
+        }
+
+        return new Response();
+    }
+
+    /**
+     * Get the ID of the currently tracked Contact.
+     */
+    public function getContactIdAction(DeviceTrackingServiceInterface $trackedDeviceService, ContactTracker $contactTracker): JsonResponse
+    {
+        $data = [];
+        if ($this->security->isAnonymous()) {
+            $lead          = $contactTracker->getContact();
+            $trackedDevice = $trackedDeviceService->getTrackedDevice();
+            $trackingId    = (null === $trackedDevice ? null : $trackedDevice->getTrackingId());
+            $data          = [
+                'id'        => ($lead) ? $lead->getId() : null,
+                'sid'       => $trackingId,
+                'device_id' => $trackingId,
+            ];
+        }
+
+        return new JsonResponse($data);
+    }
+
+    /**
+     * @return array<string,bool>
+     */
+    private function getPreferenceCenterConfig(): array
+    {
+        return [
+            'showContactFrequency'         => $this->coreParametersHelper->get('show_contact_frequency'),
+            'showContactPauseDates'        => $this->coreParametersHelper->get('show_contact_pause_dates'),
+            'showContactPreferredChannels' => $this->coreParametersHelper->get('show_contact_preferred_channels'),
+            'showContactCategories'        => $this->coreParametersHelper->get('show_contact_categories'),
+            'showContactSegments'          => $this->coreParametersHelper->get('show_contact_segments'),
+        ];
+    }
+}

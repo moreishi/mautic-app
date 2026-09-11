@@ -1,0 +1,34 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\CoreBundle\Event;
+
+use Mautic\CoreBundle\Validator\EntityEvent;
+use Symfony\Component\Validator\Context\ExecutionContextInterface;
+use Symfony\Contracts\EventDispatcher\Event;
+
+final class EntityValidateEvent extends Event
+{
+    public function __construct(
+        private readonly object $entity,
+        private readonly EntityEvent $constraint,
+        private readonly ExecutionContextInterface $context,
+    ) {
+    }
+
+    public function getEntity(): object
+    {
+        return $this->entity;
+    }
+
+    public function getConstraint(): EntityEvent
+    {
+        return $this->constraint;
+    }
+
+    public function getContext(): ExecutionContextInterface
+    {
+        return $this->context;
+    }
+}

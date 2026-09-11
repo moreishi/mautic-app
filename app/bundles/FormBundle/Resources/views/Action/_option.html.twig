@@ -1,0 +1,15 @@
+{#
+  Variables
+    - action
+    - type
+    - formId
+#}
+<option id="action_{{ type }}"
+        data-toggle="ajaxmodal"
+        data-target="#formComponentModal"
+        data-href="{{ path('mautic_formaction_action', {
+            'objectAction': 'new',
+            'type': type,
+            'tmpl': 'action',
+            'formId': formId,
+        }) }}">{{ action['label']|trans }}</option>

@@ -1,0 +1,862 @@
+<?php
+
+namespace Mautic\CampaignBundle\Entity;
+
+use Doctrine\DBAL\ArrayParameterType;
+use Doctrine\DBAL\Cache\QueryCacheProfile;
+use Doctrine\DBAL\Exception;
+use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Query;
+use Doctrine\ORM\Query\Expr;
+use Mautic\CampaignBundle\Entity\Result\CountResult;
+use Mautic\CampaignBundle\Executioner\ContactFinder\Limiter\ContactLimiter;
+use Mautic\CoreBundle\Entity\CommonRepository;
+use Mautic\ProjectBundle\Entity\ProjectRepositoryTrait;
+
+/**
+ * @extends CommonRepository<Campaign>
+ */
+class CampaignRepository extends CommonRepository
+{
+    use ContactLimiterTrait;
+    use ReplicaConnectionTrait;
+    use ProjectRepositoryTrait;
+
+    public function getEntities(array $args = [])
+    {
+        $q = $this->getEntityManager()->createQueryBuilder();
+        $q->select($this->getTableAlias().', cat')
+            ->from(Campaign::class, $this->getTableAlias(), $this->getTableAlias().'.id')
+            ->leftJoin($this->getTableAlias().'.category', 'cat');
+
+        if (!empty($args['joinLists'])) {
+            $q->leftJoin($this->getTableAlias().'.lists', 'l');
+        }
+
+        if (!empty($args['joinForms'])) {
+            $q->leftJoin($this->getTableAlias().'.forms', 'f');
+        }
+        $q->where($q->expr()->isNull($this->getTableAlias().'.deleted'));
+        $args['qb'] = $q;
+
+        return parent::getEntities($args);
+    }
+
+    public function setCampaignAsDeleted(int $campaignId): void
+    {
+        $dateTime = (new \DateTime())->format('Y-m-d H:i:s');
+
+        $this->getEntityManager()->getConnection()->update(
+            MAUTIC_TABLE_PREFIX.Event::TABLE_NAME,
+            ['deleted'     => $dateTime],
+            ['campaign_id' => $campaignId]
+        );
+
+        $this->getEntityManager()->getConnection()->update(
+            MAUTIC_TABLE_PREFIX.Campaign::TABLE_NAME,
+            ['deleted'   => $dateTime, 'is_published' => 0],
+            ['id'        => $campaignId]
+        );
+    }
+
+    /**
+     * Returns a list of all published (and active) campaigns (optionally for a specific lead).
+     *
+     * @param bool $forList   If true, returns ID and name only
+     * @param bool $viewOther If true, returns all the campaigns
+     *
+     * @return array
+     */
+    public function getPublishedCampaigns($specificId = null, ?int $leadId = null, $forList = false, $viewOther = false)
+    {
+        $q = $this->getEntityManager()->createQueryBuilder()
+            ->from(Campaign::class, 'c', 'c.id');
+
+        if ($forList && $leadId) {
+            $q->select('partial c.{id, name}, partial l.{campaign, lead, dateAdded, manuallyAdded, manuallyRemoved}, partial ll.{id}');
+        } elseif ($forList) {
+            $q->select('partial c.{id, name}, partial ll.{id}');
+        } else {
+            $q->select('c, l, partial ll.{id}')
+                ->leftJoin('c.events', 'e')
+                ->leftJoin('e.log', 'o');
+        }
+
+        if ($leadId || !$forList) {
+            $q->leftJoin('c.leads', 'l');
+        }
+
+        $q->leftJoin('c.lists', 'll')
+            ->where($this->getPublishedByDateOrmExpression($q));
+
+        if (!$viewOther) {
+            $q->andWhere($q->expr()->eq('c.createdBy', ':id'))
+                ->setParameter('id', $this->currentUser->getId());
+        }
+
+        if (!empty($specificId)) {
+            $q->andWhere(
+                $q->expr()->eq('c.id', (int) $specificId)
+            );
+        }
+
+        if (!empty($leadId)) {
+            $q->andWhere(
+                $q->expr()->eq('IDENTITY(l.lead)', (int) $leadId)
+            );
+            $q->andWhere(
+                $q->expr()->eq('l.manuallyRemoved', ':manuallyRemoved')
+            )->setParameter('manuallyRemoved', false);
+        }
+
+        return $q->getQuery()->getArrayResult();
+    }
+
+    /**
+     * Returns a list of all published (and active) campaigns that specific lead lists are part of.
+     *
+     * @param int|array $leadLists
+     */
+    public function getPublishedCampaignsByLeadLists($leadLists): array
+    {
+        if (!is_array($leadLists)) {
+            $leadLists = [(int) $leadLists];
+        } else {
+            foreach ($leadLists as &$id) {
+                $id = (int) $id;
+            }
+        }
+
+        $q = $this->getEntityManager()->getConnection()->createQueryBuilder()
+            ->select('c.id, c.name, ll.leadlist_id as list_id')
+            ->from(MAUTIC_TABLE_PREFIX.'campaigns', 'c');
+
+        $q->join('c', MAUTIC_TABLE_PREFIX.'campaign_leadlist_xref', 'll', 'c.id = ll.campaign_id')
+            ->where($this->getPublishedByDateDbalExpression($q));
+
+        $q->andWhere(
+            $q->expr()->in('ll.leadlist_id', ':leadLists')
+        );
+
+        $q->setParameter('leadLists', $leadLists, ArrayParameterType::INTEGER);
+
+        $results = $q->executeQuery()->fetchAllAssociative();
+
+        $campaigns = [];
+        foreach ($results as $result) {
+            if (!isset($campaigns[$result['id']])) {
+                $campaigns[$result['id']] = [
+                    'id'    => $result['id'],
+                    'name'  => $result['name'],
+                    'lists' => [],
+                ];
+            }
+
+            $campaigns[$result['id']]['lists'][$result['list_id']] = [
+                'id' => $result['list_id'],
+            ];
+        }
+
+        return $campaigns;
+    }
+
+    /**
+     * Get array of list IDs assigned to this campaign.
+     *
+     * @param int|null $id
+     */
+    public function getCampaignListIds($id = null): array
+    {
+        $q = $this->getEntityManager()->getConnection()->createQueryBuilder()
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leadlist_xref', 'cl');
+
+        if ($id) {
+            $q->select('cl.leadlist_id')
+                ->where(
+                    $q->expr()->eq('cl.campaign_id', $id)
+                );
+        } else {
+            // Retrieve a list of unique IDs that are assigned to a campaign
+            $q->select('DISTINCT cl.leadlist_id');
+        }
+
+        $lists   = [];
+        $results = $q->executeQuery()->fetchAllAssociative();
+
+        foreach ($results as $r) {
+            $lists[] = $r['leadlist_id'];
+        }
+
+        return $lists;
+    }
+
+    /**
+     * Get array of list IDs => name assigned to this campaign.
+     */
+    public function getCampaignListSources($id): array
+    {
+        $q = $this->getEntityManager()->getConnection()->createQueryBuilder()
+            ->select('cl.leadlist_id, l.name')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leadlist_xref', 'cl')
+            ->join('cl', MAUTIC_TABLE_PREFIX.'lead_lists', 'l', 'l.id = cl.leadlist_id');
+        $q->where(
+            $q->expr()->eq('cl.campaign_id', $id)
+        );
+
+        $lists   = [];
+        $results = $q->executeQuery()->fetchAllAssociative();
+
+        foreach ($results as $r) {
+            $lists[$r['leadlist_id']] = $r['name'];
+        }
+
+        return $lists;
+    }
+
+    /**
+     * Get array of form IDs => name assigned to this campaign.
+     */
+    public function getCampaignFormSources($id): array
+    {
+        $q = $this->getEntityManager()->getConnection()->createQueryBuilder()
+            ->select('cf.form_id, f.name')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_form_xref', 'cf')
+            ->join('cf', MAUTIC_TABLE_PREFIX.'forms', 'f', 'f.id = cf.form_id');
+        $q->where(
+            $q->expr()->eq('cf.campaign_id', $id)
+        );
+
+        $forms   = [];
+        $results = $q->executeQuery()->fetchAllAssociative();
+
+        foreach ($results as $r) {
+            $forms[$r['form_id']] = $r['name'];
+        }
+
+        return $forms;
+    }
+
+    /**
+     * @return array
+     */
+    public function findByFormId($formId)
+    {
+        $q = $this->createQueryBuilder('c')
+            ->join('c.forms', 'f');
+        $q->where(
+            $q->expr()->eq('f.id', $formId)
+        );
+
+        return $q->getQuery()->getResult();
+    }
+
+    public function getTableAlias(): string
+    {
+        return 'c';
+    }
+
+    /**
+     * @param \Doctrine\ORM\QueryBuilder|\Doctrine\DBAL\Query\QueryBuilder $q
+     */
+    protected function addCatchAllWhereClause($q, $filter): array
+    {
+        return $this->addStandardCatchAllWhereClause($q, $filter, [
+            'c.name',
+            'c.description',
+        ]);
+    }
+
+    /**
+     * @param \Doctrine\ORM\QueryBuilder|\Doctrine\DBAL\Query\QueryBuilder $q
+     */
+    protected function addSearchCommandWhereClause($q, $filter): array
+    {
+        [$expr, $parameters] = $this->addStandardSearchCommandWhereClause($q, $filter);
+        if ($expr) {
+            return [$expr, $parameters];
+        }
+
+        $unique  = $this->generateRandomParameterName();
+
+        switch ($filter->command) {
+            case $this->translator->trans('mautic.campaign.campaign.searchcommand.isexpired'):
+            case $this->translator->trans('mautic.campaign.campaign.searchcommand.isexpired', [], null, 'en_US'):
+                $expr = $q->expr()->and(
+                    $q->expr()->eq('c.isPublished', ":{$unique}"),
+                    $q->expr()->isNotNull('c.publishDown'),
+                    $q->expr()->neq('c.publishDown', $q->expr()->literal('')),
+                    $q->expr()->lt('c.publishDown', 'CURRENT_TIMESTAMP()')
+                );
+                $forceParameters = [$unique => true];
+                break;
+            case $this->translator->trans('mautic.campaign.campaign.searchcommand.ispending'):
+            case $this->translator->trans('mautic.campaign.campaign.searchcommand.ispending', [], null, 'en_US'):
+                $expr = $q->expr()->and(
+                    $q->expr()->eq('c.isPublished', ":{$unique}"),
+                    $q->expr()->isNotNull('c.publishUp'),
+                    $q->expr()->neq('c.publishUp', $q->expr()->literal('')),
+                    $q->expr()->gt('c.publishUp', 'CURRENT_TIMESTAMP()')
+                );
+                $forceParameters = [$unique => true];
+                break;
+            case $this->translator->trans('mautic.project.searchcommand.name'):
+            case $this->translator->trans('mautic.project.searchcommand.name', [], null, 'en_US'):
+                return $this->handleProjectFilter(
+                    $this->_em->getConnection()->createQueryBuilder(),
+                    'campaign_id',
+                    'campaign_projects_xref',
+                    $this->getTableAlias(),
+                    $filter->string,
+                    $filter->not
+                );
+        }
+
+        if ($expr && $filter->not) {
+            $expr = $q->expr()->not($expr);
+        }
+
+        if (!empty($forceParameters)) {
+            $parameters = $forceParameters;
+        }
+
+        return [$expr, $parameters];
+    }
+
+    /**
+     * @return string[]
+     */
+    public function getSearchCommands(): array
+    {
+        return array_merge([
+            'mautic.campaign.campaign.searchcommand.isexpired',
+            'mautic.campaign.campaign.searchcommand.ispending',
+            'mautic.project.searchcommand.name',
+        ], $this->getStandardSearchCommands());
+    }
+
+    /**
+     * Get a list of popular (by logs) campaigns.
+     *
+     * @param int $limit
+     */
+    public function getPopularCampaigns($limit = 10): array
+    {
+        $q = $this->getEntityManager()->getConnection()->createQueryBuilder();
+
+        $q->select('count(cl.ip_id) as hits, c.id AS campaign_id, c.name')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_lead_event_log', 'cl')
+            ->leftJoin('cl', MAUTIC_TABLE_PREFIX.'campaigns', 'c', 'cl.campaign_id = c.id')
+            ->orderBy('hits', 'DESC')
+            ->groupBy('c.id, c.name')
+            ->setMaxResults($limit);
+
+        $expr = $this->getPublishedByDateDbalExpression($q, 'c');
+        $q->where($expr);
+
+        return $q->executeQuery()->fetchAllAssociative();
+    }
+
+    public function getCountsForPendingContacts($campaignId, array $pendingEvents, ContactLimiter $limiter): CountResult
+    {
+        $q = $this->getReplicaConnection($limiter)->createQueryBuilder();
+
+        $q->select('min(cl.lead_id) as min_id, max(cl.lead_id) as max_id, count(cl.lead_id) as the_count')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leads', 'cl')
+            ->where(
+                $q->expr()->and(
+                    $q->expr()->eq('cl.campaign_id', (int) $campaignId),
+                    $q->expr()->eq('cl.manually_removed', ':false')
+                )
+            )
+            ->setParameter('false', false, 'boolean');
+
+        $this->updateQueryFromContactLimiter('cl', $q, $limiter, true);
+
+        if (count($pendingEvents) > 0) {
+            $q->leftJoin(
+                'cl',
+                MAUTIC_TABLE_PREFIX.'campaign_lead_event_log',
+                'e',
+                $q->expr()->and(
+                    $q->expr()->eq('cl.lead_id', 'e.lead_id'),
+                    $q->expr()->eq('e.rotation', 'cl.rotation'),
+                    $q->expr()->in('e.event_id', ':pendingEvents')
+                )
+            )
+                ->andWhere($q->expr()->isNull('e.lead_id'))
+                ->setParameter('pendingEvents', $pendingEvents, ArrayParameterType::INTEGER);
+        }
+
+        $result = $q->executeQuery()->fetchAssociative();
+
+        return new CountResult($result['the_count'], $result['min_id'], $result['max_id']);
+    }
+
+    /**
+     * Get pending contact IDs for a campaign.
+     */
+    public function getPendingContactIds($campaignId, ContactLimiter $limiter): array
+    {
+        if ($limiter->hasCampaignLimit() && 0 === $limiter->getCampaignLimitRemaining()) {
+            return [];
+        }
+
+        $q = $this->getReplicaConnection($limiter)->createQueryBuilder();
+
+        $q->select('cl.lead_id')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leads', 'cl')
+            ->where(
+                $q->expr()->and(
+                    $q->expr()->eq('cl.campaign_id', (int) $campaignId),
+                    $q->expr()->eq('cl.manually_removed', ':false')
+                )
+            )
+            ->setParameter('false', false, 'boolean')
+            ->orderBy('cl.lead_id', 'ASC');
+
+        $this->updateQueryFromContactLimiter('cl', $q, $limiter);
+
+        // Only leads that have not started the campaign
+        $sq = $this->getReplicaConnection($limiter)->createQueryBuilder();
+        $sq->select('null')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_lead_event_log', 'e')
+            ->where(
+                $sq->expr()->and(
+                    $sq->expr()->eq('e.lead_id', 'cl.lead_id'),
+                    $sq->expr()->eq('e.campaign_id', (int) $campaignId),
+                    $sq->expr()->eq('e.rotation', 'cl.rotation')
+                )
+            );
+
+        $q->andWhere(
+            sprintf('NOT EXISTS (%s)', $sq->getSQL())
+        );
+
+        if ($limiter->hasCampaignLimit() && $limiter->getCampaignLimitRemaining() < $limiter->getBatchLimit()) {
+            $q->setMaxResults($limiter->getCampaignLimitRemaining());
+        }
+
+        $results = $q->executeQuery()->fetchAllAssociative();
+
+        $leads   = [];
+        foreach ($results as $r) {
+            $leads[] = $r['lead_id'];
+        }
+        unset($results);
+
+        if ($limiter->hasCampaignLimit()) {
+            $limiter->reduceCampaignLimitRemaining(count($leads));
+        }
+
+        return $leads;
+    }
+
+    /**
+     * Get a count of leads that belong to the campaign.
+     *
+     * @param int   $campaignId
+     * @param int   $leadId        Optional lead ID to check if lead is part of campaign
+     * @param array $pendingEvents List of specific events to rule out
+     *
+     * @throws \Doctrine\DBAL\Cache\CacheException
+     *
+     * @deprecated
+     */
+    public function getCampaignLeadCount($campaignId, $leadId = null, $pendingEvents = [], ?\DateTimeInterface $dateFrom = null, ?\DateTimeInterface $dateTo = null): int
+    {
+        $q = $this->getReplicaConnection()->createQueryBuilder();
+
+        $q->select('count(cl.lead_id) as lead_count')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leads', 'cl')
+            ->where(
+                $q->expr()->and(
+                    $q->expr()->eq('cl.campaign_id', (int) $campaignId),
+                    $q->expr()->eq('cl.manually_removed', ':false')
+                )
+            )
+            ->setParameter('false', false, Types::BOOLEAN);
+
+        if ($leadId) {
+            $q->andWhere(
+                $q->expr()->eq('cl.lead_id', (int) $leadId)
+            );
+        }
+
+        if ($dateFrom && $dateTo) {
+            $q->andWhere('cl.date_added BETWEEN FROM_UNIXTIME(:dateFrom) AND FROM_UNIXTIME(:dateTo)')
+                ->setParameter('dateFrom', $dateFrom->getTimestamp(), \PDO::PARAM_INT)
+                ->setParameter('dateTo', $dateTo->getTimestamp(), \PDO::PARAM_INT);
+        }
+
+        if (count($pendingEvents) > 0) {
+            $sq = $this->getReplicaConnection()->createQueryBuilder();
+            $sq->select('null')
+                ->from(MAUTIC_TABLE_PREFIX.'campaign_lead_event_log', 'e')
+                ->where(
+                    $sq->expr()->and(
+                        $sq->expr()->eq('cl.lead_id', 'e.lead_id'),
+                        $sq->expr()->in('e.event_id', $pendingEvents)
+                    )
+                );
+
+            if ($dateFrom && $dateTo) {
+                $sq->andWhere('cl.date_triggered BETWEEN FROM_UNIXTIME(:dateFrom) AND FROM_UNIXTIME(:dateTo)')
+                    ->setParameter('dateFrom', $dateFrom->getTimestamp(), \PDO::PARAM_INT)
+                    ->setParameter('dateTo', $dateTo->getTimestamp(), \PDO::PARAM_INT);
+            }
+
+            $q->andWhere(
+                sprintf('NOT EXISTS (%s)', $sq->getSQL())
+            );
+        }
+
+        if ($this->getReplicaConnection()->getConfiguration()->getResultCache()) {
+            $results = $this->getReplicaConnection()->executeCacheQuery(
+                $q->getSQL(),
+                $q->getParameters(),
+                $q->getParameterTypes(),
+                new QueryCacheProfile(600)
+            )->fetchAllAssociative();
+        } else {
+            $results = $q->executeQuery()->fetchAllAssociative();
+        }
+
+        return (int) $results[0]['lead_count'];
+    }
+
+    /**
+     * Returns true if the campaign has at least one lead.
+     */
+    public function hasCampaignLeads(int $campaignId, int $cacheTTL = 0): bool
+    {
+        $q = $this->getReplicaConnection()->createQueryBuilder();
+
+        $q->select('1')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leads', 'cl')
+            ->where(
+                $q->expr()->and(
+                    $q->expr()->eq('cl.campaign_id', ':campaignId'),
+                    $q->expr()->eq('cl.manually_removed', '0')
+                )
+            )
+            ->setParameter('campaignId', $campaignId)
+            ->setMaxResults(1);
+
+        if ($this->getReplicaConnection()->getConfiguration()->getResultCache()) {
+            $results  = $this->getReplicaConnection()->executeCacheQuery(
+                $q->getSQL(),
+                $q->getParameters(),
+                $q->getParameterTypes(),
+                new QueryCacheProfile($cacheTTL)
+            )->fetchAllAssociative();
+        } else {
+            $results = $q->executeQuery()->fetchAllAssociative();
+        }
+
+        return (bool) $results;
+    }
+
+    /**
+     * Get lead data of a campaign.
+     *
+     * @param int        $start
+     * @param bool|false $limit
+     * @param array      $select
+     *
+     * @return mixed[]
+     */
+    public function getCampaignLeads($campaignId, $start = 0, $limit = false, $select = ['cl.lead_id']): array
+    {
+        $q = $this->getReplicaConnection()->createQueryBuilder();
+
+        $q->select($select)
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leads', 'cl')
+            ->where(
+                $q->expr()->and(
+                    $q->expr()->eq('cl.campaign_id', (int) $campaignId),
+                    $q->expr()->eq('cl.manually_removed', ':false')
+                )
+            )
+            ->setParameter('false', false, 'boolean')
+            ->orderBy('cl.lead_id', 'ASC');
+
+        if (!empty($limit)) {
+            $q->setFirstResult($start)
+                ->setMaxResults($limit);
+        }
+
+        return $q->executeQuery()->fetchAllAssociative();
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getContactSingleSegmentByCampaign($contactId, $campaignId)
+    {
+        $q = $this->getEntityManager()->getConnection()->createQueryBuilder();
+
+        return $q->select('ll.id, ll.name')
+            ->from(MAUTIC_TABLE_PREFIX.'lead_lists', 'll')
+            ->join('ll', MAUTIC_TABLE_PREFIX.'lead_lists_leads', 'lll', 'lll.leadlist_id = ll.id and lll.lead_id = :contactId and lll.manually_removed = 0')
+            ->join('ll', MAUTIC_TABLE_PREFIX.'campaign_leadlist_xref', 'clx', 'clx.leadlist_id = ll.id and clx.campaign_id = :campaignId')
+            ->setParameter('contactId', (int) $contactId)
+            ->setParameter('campaignId', (int) $campaignId)
+            ->setMaxResults(1)
+            ->executeQuery()
+            ->fetchAssociative();
+    }
+
+    /**
+     * @param int[] $campaignIds
+     */
+    public function getCampaignsSegmentShare(int $segmentId, array $campaignIds = []): array
+    {
+        $q = $this->getEntityManager()->getConnection()->createQueryBuilder();
+        $q->select('c.id, c.name, ROUND(IFNULL(COUNT(DISTINCT t.lead_id)/COUNT(DISTINCT cl.lead_id)*100, 0),1) segmentCampaignShare');
+        $q->from(MAUTIC_TABLE_PREFIX.'campaigns', 'c')
+            ->leftJoin('c', MAUTIC_TABLE_PREFIX.'campaign_leads', 'cl', 'cl.campaign_id = c.id AND cl.manually_removed = 0')
+            ->leftJoin('cl',
+                '(SELECT lll.lead_id AS ll, lll.lead_id FROM '.MAUTIC_TABLE_PREFIX.'lead_lists_leads lll WHERE lll.leadlist_id = '.$segmentId
+                .' AND lll.manually_removed = 0)',
+                't',
+                't.lead_id = cl.lead_id'
+            );
+        $q->groupBy('c.id');
+
+        if ([] !== $campaignIds) {
+            $q->where($q->expr()->in('c.id', ':campaignIds'));
+            $q->setParameter('campaignIds', $campaignIds, ArrayParameterType::INTEGER);
+        }
+
+        return $q->executeQuery()->fetchAllAssociative();
+    }
+
+    /**
+     * Searches for emails assigned to campaign and returns associative array of email ids in format:.
+     *
+     *  array (size=1)
+     *      0 =>
+     *          array (size=2)
+     *              'channelId' => int 18
+     *
+     * or empty array if nothing found.
+     *
+     * @param int $id
+     *
+     * @deprecated The method is deprecated and will be removed in Mautic 8.x.
+     * Use the `\Mautic\CampaignBundle\Entity\EventRepository::getCampaignEmailEvents()` method instead.
+     * @see EventRepository::getCampaignEmailEvents
+     */
+    #[\Deprecated('The method is deprecated and will be removed in Mautic 8.x. Use the `\Mautic\CampaignBundle\Entity\EventRepository::getCampaignEmailEvents()` method instead.')]
+    public function fetchEmailIdsById($id): array
+    {
+        $emails = $this->getEntityManager()
+            ->createQueryBuilder()
+            ->select('e.channelId')
+            ->from(Campaign::class, $this->getTableAlias(), $this->getTableAlias().'.id')
+            ->leftJoin(
+                $this->getTableAlias().'.events',
+                'e',
+                Expr\Join::WITH,
+                "e.channel = '".Event::CHANNEL_EMAIL."'"
+            )
+            ->where($this->getTableAlias().'.id = :id')
+            ->setParameter('id', $id)
+            ->andWhere('e.channelId IS NOT NULL')
+            ->getQuery()
+            ->setHydrationMode(Query::HYDRATE_ARRAY)
+            ->getResult();
+
+        $return = [];
+        foreach ($emails as $email) {
+            // Every channelId represents e-mail ID
+            $return[] = $email['channelId']; // mautic_campaign_events.channel_id
+        }
+
+        return $return;
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    public function getCampaignIdsWithDependenciesOnEmail(int $emailId): array
+    {
+        $query = $this->getEntityManager()
+            ->createQueryBuilder()
+            ->select($this->getTableAlias().'.id')
+            ->distinct()
+            ->from(Campaign::class, $this->getTableAlias(), $this->getTableAlias().'.id')
+            ->leftJoin(
+                $this->getTableAlias().'.events',
+                'e',
+                Expr\Join::WITH,
+                "e.channel = '".Event::CHANNEL_EMAIL."'"
+            )
+            ->where('e.channelId = :emailId')
+            ->setParameter('emailId', $emailId)
+            ->getQuery();
+
+        return array_unique(array_map(fn ($val): int => (int) $val, $query->getSingleColumnResult()));
+    }
+
+    /**
+     * Find next events for contacts in campaign that haven't been executed yet
+     * based on parent event execution and decision paths.
+     *
+     * @return array<mixed>
+     */
+    public function findStuckEventsToExecute(int $campaignId, int $limit = 100, ?int $minLeadId = 0,
+        ?int $maxLeadId = 0, ?string $recordsAfter = null): array
+    {
+        $query = $this->getEntityManager()->getConnection()->createQueryBuilder();
+        $query->select(
+            'log.lead_id AS contact_id',
+            'ce.id AS next_event_id',
+            'ce.name AS next_event_name',
+            'ce.type AS next_event_type',
+            'ce.event_type AS next_event_event_type',
+            'ce.event_order AS event_order',
+            'parent.id AS parent_event_id',
+            'DATE_FORMAT(log.date_triggered, \'%Y-%m-%d %H:%i\') AS last_executed_date'
+        )
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leads', 'clr')
+            // Ensure the contact is still active in the campaign and get the latest rotation
+            ->innerJoin(
+                'clr',
+                MAUTIC_TABLE_PREFIX.'campaign_lead_event_log',
+                'log',
+                'clr.lead_id = log.lead_id AND clr.campaign_id = :campaign_id AND clr.manually_removed = 0
+                 AND clr.rotation = log.rotation'
+            )
+            ->innerJoin(
+                'log',
+                MAUTIC_TABLE_PREFIX.'campaign_events',
+                'parent',
+                'log.campaign_id = :campaign_id AND log.event_id = parent.id AND parent.deleted IS NULL'
+            )
+            // Join to get the next event (child event) in the campaign also ignore scheduled events
+            ->innerJoin(
+                'parent',
+                MAUTIC_TABLE_PREFIX.'campaign_events',
+                'ce',
+                "ce.campaign_id = :campaign_id AND ce.parent_id = parent.id AND ce.deleted IS NULL AND
+                 ce.event_type != 'decision' AND log.is_scheduled = 0 AND ce.date_linked <= log.date_triggered"
+            )
+            // Check the executed events for the current rotation
+            ->leftJoin(
+                'ce',
+                MAUTIC_TABLE_PREFIX.'campaign_lead_event_log',
+                'executed',
+                'executed.lead_id = log.lead_id AND executed.campaign_id = :campaign_id
+                AND ((executed.event_id = ce.id AND executed.version > 1) OR executed.is_scheduled = 1)
+                AND executed.rotation = log.rotation '
+            )
+            ->andWhere('executed.event_id IS NULL')
+            ->andWhere(
+                $query->expr()->or(
+                    $query->expr()->and(
+                        // For condition/decision parents, version > 1 means evaluation completed.
+                        // version = 1 means the job was killed after the DB INSERT but before evaluation —
+                        // children must NOT be picked up; the condition/decision itself must be re-executed.
+                        $query->expr()->in('parent.event_type', ["'condition'", "'decision'"]),
+                        $query->expr()->gt('log.version', 1),
+                        $query->expr()->or(
+                            // "No" path taken
+                            $query->expr()->and(
+                                $query->expr()->eq('ce.decision_path', $query->expr()->literal('no')),
+                                $query->expr()->eq('log.non_action_path_taken', 1)
+                            ),
+                            // "Yes" path or default path taken
+                            $query->expr()->and(
+                                $query->expr()->or(
+                                    $query->expr()->eq('ce.decision_path', $query->expr()->literal('yes')),
+                                    $query->expr()->isNull('ce.decision_path')
+                                ),
+                                $query->expr()->or(
+                                    $query->expr()->eq('log.non_action_path_taken', 0),
+                                    $query->expr()->isNull('log.non_action_path_taken')
+                                )
+                            )
+                        )
+                    ),
+                    // For action events, always proceed
+                    $query->expr()->eq('parent.event_type', $query->expr()->literal('action'))
+                )
+            );
+
+        if ($minLeadId > 0) {
+            $query->andWhere('clr.lead_id >= :minLeadId')
+                ->setParameter('minLeadId', $minLeadId);
+        }
+        if ($maxLeadId > 0) {
+            $query->andWhere('clr.lead_id <= :maxLeadId')
+                ->setParameter('maxLeadId', $maxLeadId);
+        }
+        if ($recordsAfter) {
+            $query->andWhere('clr.date_added >= :minDateForUnStuck')
+                ->setParameter('minDateForUnStuck', $recordsAfter);
+        }
+
+        $query->orderBy('log.lead_id', 'ASC')
+            ->addOrderBy('log.date_triggered', 'DESC')
+            ->addOrderBy('ce.event_order', 'ASC')
+            ->setMaxResults($limit);
+
+        $query->setParameter('campaign_id', $campaignId);
+
+        $result = $query->executeQuery();
+
+        return $result->fetchAllAssociative();
+    }
+
+    /**
+     * @return array<string, mixed>
+     *
+     * @throws Exception
+     */
+    public function getCampaignPublishAndVersionData(int $campaignId): array
+    {
+        $result = $this->getEntityManager()->getConnection()
+            ->executeQuery(
+                'SELECT is_published, version FROM '.MAUTIC_TABLE_PREFIX.'campaigns WHERE id = ? FOR UPDATE',
+                [$campaignId],
+                [\PDO::PARAM_INT]
+            )->fetchAssociative();
+
+        return $result ?: [];
+    }
+
+    /**
+     * Get campaigns that have events stuck in the queue.
+     *
+     * @return array<mixed>
+     */
+    public function getCampaignsToUnStuckEvents(string $recordsAfter): array
+    {
+        $innerQuery = $this->getEntityManager()->getConnection()->createQueryBuilder();
+        $innerQuery->select('1')
+            ->from(MAUTIC_TABLE_PREFIX.'campaign_leads', 'clr')
+            ->where(
+                $innerQuery->expr()->and(
+                    $innerQuery->expr()->eq('clr.campaign_id', 'c.id'),
+                    $innerQuery->expr()->eq('clr.manually_removed', '0'),
+                    $innerQuery->expr()->gte('clr.date_added', ':minDateForUnStuck')
+                )
+            );
+
+        $query = $this->getEntityManager()->getConnection()->createQueryBuilder();
+        $query->select(
+            'c.id AS id',
+            'c.name AS name'
+        )
+            ->from(MAUTIC_TABLE_PREFIX.'campaigns', 'c')
+            ->where('c.deleted IS NULL')
+            ->andWhere($this->getPublishedByDateDbalExpression($query))
+            ->andWhere(
+                sprintf('EXISTS (%s)', $innerQuery->getSQL())
+            )
+            ->setParameter('minDateForUnStuck', $recordsAfter);
+
+        return $query->executeQuery()->fetchAllAssociative();
+    }
+}

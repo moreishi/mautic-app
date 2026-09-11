@@ -1,0 +1,61 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\FormBundle\Event;
+
+use Mautic\CoreBundle\Event\CommonEvent;
+use Mautic\FormBundle\Entity\Field;
+
+final class ValidationEvent extends CommonEvent
+{
+    private bool $valid = true;
+
+    private string $invalidReason = '';
+
+    /**
+     * @param mixed $value
+     */
+    public function __construct(
+        private readonly Field $field,
+        private $value,
+    ) {
+    }
+
+    public function getField(): Field
+    {
+        return $this->field;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getValue()
+    {
+        return $this->value;
+    }
+
+    public function failedValidation(string $reason): void
+    {
+        $this->valid         = false;
+        $this->invalidReason = $reason;
+
+        $this->stopPropagation();
+    }
+
+    /**
+     * Is the field valid.
+     */
+    public function isValid(): bool
+    {
+        return $this->valid;
+    }
+
+    /**
+     * Get the reason this field was invalidated.
+     */
+    public function getInvalidReason(): string
+    {
+        return $this->invalidReason;
+    }
+}

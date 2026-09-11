@@ -1,0 +1,545 @@
+<?php
+
+namespace Mautic\FormBundle\Controller;
+
+use Doctrine\Persistence\ManagerRegistry;
+use Mautic\CoreBundle\Controller\FormController as CommonFormController;
+use Mautic\CoreBundle\Factory\ModelFactory;
+use Mautic\CoreBundle\Factory\PageHelperFactoryInterface;
+use Mautic\CoreBundle\Helper\CoreParametersHelper;
+use Mautic\CoreBundle\Helper\UserHelper;
+use Mautic\CoreBundle\Security\Permissions\CorePermissions;
+use Mautic\CoreBundle\Service\FlashBag;
+use Mautic\CoreBundle\Translation\Translator;
+use Mautic\FormBundle\Helper\FormFieldHelper;
+use Mautic\FormBundle\Helper\FormUploader;
+use Mautic\FormBundle\Model\FieldModel;
+use Mautic\FormBundle\Model\FormModel;
+use Mautic\FormBundle\Model\SubmissionModel;
+use Mautic\FormBundle\Model\SubmissionResultLoader;
+use Mautic\LeadBundle\Form\Type\BatchType;
+use Mautic\LeadBundle\Model\ListModel;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use Symfony\Component\Filesystem\Filesystem;
+use Symfony\Component\Form\FormFactoryInterface;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\ResponseHeaderBag;
+use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
+
+final class ResultController extends CommonFormController
+{
+    public function __construct(
+        FormFactoryInterface $formFactory,
+        FormFieldHelper $fieldHelper,
+        ManagerRegistry $doctrine,
+        ModelFactory $modelFactory,
+        UserHelper $userHelper,
+        CoreParametersHelper $coreParametersHelper,
+        EventDispatcherInterface $dispatcher,
+        Translator $translator,
+        FlashBag $flashBag,
+        RequestStack $requestStack,
+        CorePermissions $security,
+        private readonly FormModel $formModel,
+        private readonly SubmissionResultLoader $submissionResultLoader,
+        private readonly SubmissionModel $submissionModel,
+    ) {
+        $this->setStandardParameters(
+            'form.submission', // model name
+            'form:forms', // permission base
+            'mautic_form', // route base
+            'mautic.formresult', // session base
+            'mautic.form.result', // lang string base
+            '@MauticForm/Result', // template base
+            'mautic_form', // activeLink
+            'formresult' // mauticContent
+        );
+
+        parent::__construct($formFactory, $fieldHelper, $doctrine, $modelFactory, $userHelper, $coreParametersHelper, $dispatcher, $translator, $flashBag, $requestStack, $security);
+    }
+
+    public function indexAction(Request $request, PageHelperFactoryInterface $pageHelperFacotry, int $objectId, int $page = 1): Response
+    {
+        $form           = $this->formModel->getEntity($objectId);
+        $session        = $request->getSession();
+        $formPage       = $session->get('mautic.form.page', 1);
+        $returnUrl      = $this->generateUrl('mautic_form_index', ['page' => $formPage]);
+        $viewOnlyFields = $this->formModel->getCustomComponents()['viewOnlyFields'];
+
+        if (null === $form) {
+            // redirect back to form list
+            return $this->postActionRedirect(
+                [
+                    'returnUrl'       => $returnUrl,
+                    'viewParameters'  => ['page' => $formPage],
+                    'contentTemplate' => 'Mautic\FormBundle\Controller\FormController::indexAction',
+                    'passthroughVars' => [
+                        'activeLink'    => 'mautic_form_index',
+                        'mauticContent' => 'form',
+                    ],
+                    'flashes' => [
+                        [
+                            'type'    => 'error',
+                            'msg'     => 'mautic.form.error.notfound',
+                            'msgVars' => ['%id%' => $objectId],
+                        ],
+                    ],
+                ]
+            );
+        }
+        if (!$this->security->hasEntityAccess(
+            'form:forms:viewown',
+            'form:forms:viewother',
+            $form->getCreatedBy()
+        )
+        ) {
+            $this->throwAccessDenied();
+        }
+
+        if ('POST' === $request->getMethod()) {
+            $this->setListFilters($request->query->get('name'));
+        }
+
+        $pageHelper        = $pageHelperFacotry->make('mautic.formresult.'.$objectId, $page);
+
+        // set limits
+        $limit = $pageHelper->getLimit();
+        $start = $pageHelper->getStart();
+
+        // Set order direction to desc if not set
+        if (!$session->get('mautic.formresult.'.$objectId.'.orderbydir')) {
+            $session->set('mautic.formresult.'.$objectId.'.orderbydir', 'DESC');
+        }
+
+        $orderBy    = $session->get('mautic.formresult.'.$objectId.'.orderby', 's.date_submitted');
+        $orderByDir = $session->get('mautic.formresult.'.$objectId.'.orderbydir', 'DESC');
+        $filters    = $session->get('mautic.formresult.'.$objectId.'.filters', []);
+
+        if ($request->query->has('result')) {
+            // Force ID
+            $filters['s.id'] = ['column' => 's.id', 'expr' => 'like', 'value' => (int) $request->query->get('result'), 'strict' => false];
+            $session->set("mautic.formresult.{$objectId}.filters", $filters);
+        }
+
+        // get the results
+        $entities = $this->submissionModel->getEntities(
+            [
+                'start'          => $start,
+                'limit'          => $limit,
+                'filter'         => ['force' => $filters],
+                'orderBy'        => $orderBy,
+                'orderByDir'     => $orderByDir,
+                'form'           => $form,
+                'withTotalCount' => true,
+                'viewOnlyFields' => $viewOnlyFields,
+                'simpleResults'  => true,
+            ]
+        );
+
+        $count   = $entities['count'];
+        $results = $entities['results'];
+        unset($entities);
+
+        if ($count && $count < ($start + 1)) {
+            // the number of entities are now less then the current page so redirect to the last page
+            $lastPage = $pageHelper->countPage($count);
+            $pageHelper->rememberPage($lastPage);
+            $returnUrl = $this->generateUrl('mautic_form_results', ['objectId' => $objectId, 'page' => $lastPage]);
+
+            return $this->postActionRedirect(
+                [
+                    'returnUrl'       => $returnUrl,
+                    'viewParameters'  => ['page' => $lastPage],
+                    'contentTemplate' => 'Mautic\FormBundle\Controller\ResultController::indexAction',
+                    'passthroughVars' => [
+                        'activeLink'    => 'mautic_form_index',
+                        'mauticContent' => 'formresult',
+                    ],
+                ]
+            );
+        }
+
+        // set what page currently on so that we can return here if need be
+        $pageHelper->rememberPage($page);
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'items'          => $results,
+                    'filters'        => $filters,
+                    'form'           => $form,
+                    'viewOnlyFields' => $viewOnlyFields,
+                    'page'           => $page,
+                    'totalCount'     => $count,
+                    'limit'          => $limit,
+                    'tmpl'           => $request->isXmlHttpRequest() ? $request->get('tmpl', 'index') : 'index',
+                    'canDelete'      => $this->security->hasEntityAccess(
+                        'form:forms:editown',
+                        'form:forms:editother',
+                        $form->getCreatedBy()
+                    ),
+                    'enableExportPermission'=> $this->security->isAdmin() || $this->security->isGranted('form:export:enable', 'MATCH_ONE'),
+                ],
+                'contentTemplate' => '@MauticForm/Result/list.html.twig',
+                'passthroughVars' => [
+                    'activeLink'    => 'mautic_form_index',
+                    'mauticContent' => 'formresult',
+                    'route'         => $this->generateUrl(
+                        'mautic_form_results',
+                        [
+                            'objectId' => $objectId,
+                            'page'     => $page,
+                        ]
+                    ),
+                ],
+            ]
+        );
+    }
+
+    public function downloadFileAction(int $submissionId, string $field, FormUploader $formUploader): BinaryFileResponse
+    {
+        $submission             = $this->submissionResultLoader->getSubmissionWithResult($submissionId);
+
+        if (!$submission) {
+            throw $this->createNotFoundException();
+        }
+
+        $results     = $submission->getResults();
+        $fieldEntity = $submission->getFieldByAlias($field);
+
+        if (empty($results[$field]) || null === $fieldEntity) {
+            throw $this->createNotFoundException();
+        }
+
+        if (empty($fieldEntity->getProperties()['public']) && !$this->security->hasEntityAccess(
+            'form:forms:viewown',
+            'form:forms:viewother',
+            $submission->getForm()->getCreatedBy())
+        ) {
+            $this->throwAccessDenied();
+        }
+
+        $fileName = $results[$field];
+        $file     = $formUploader->getCompleteFilePath($fieldEntity, $fileName);
+
+        $fs = new Filesystem();
+        if (!$fs->exists($file)) {
+            throw $this->createNotFoundException();
+        }
+
+        $response = new BinaryFileResponse($file);
+        $response::trustXSendfileTypeHeader();
+        $response->setContentDisposition(
+            ResponseHeaderBag::DISPOSITION_ATTACHMENT,
+            $fileName
+        );
+
+        return $response;
+    }
+
+    public function downloadFileByFileNameAction(string $fieldId, string $fileName, FieldModel $fieldModel, FormUploader $formUploader): BinaryFileResponse
+    {
+        $fieldEntity = $fieldModel->getEntity($fieldId);
+
+        if (empty($fieldEntity->getProperties()['public']) && !$this->security->hasEntityAccess(
+            'form:forms:viewown',
+            'form:forms:viewother',
+            $fieldEntity->getForm()->getCreatedBy())
+        ) {
+            $this->throwAccessDenied();
+        }
+
+        $file = $formUploader->getCompleteFilePath($fieldEntity, $fileName);
+
+        $fs   = new Filesystem();
+        if (!$fs->exists($file)) {
+            throw $this->createNotFoundException();
+        }
+
+        $response = new BinaryFileResponse($file);
+        $response::trustXSendfileTypeHeader();
+        $response->setContentDisposition(
+            ResponseHeaderBag::DISPOSITION_ATTACHMENT,
+            $fileName
+        );
+
+        return $response;
+    }
+
+    /**
+     * @param int    $objectId
+     * @param string $format
+     *
+     * @throws \Exception
+     */
+    public function exportAction(Request $request, $objectId, $format = 'csv'): Response
+    {
+        $form      = $this->formModel->getEntity($objectId);
+        $session   = $request->getSession();
+        $formPage  = $session->get('mautic.form.page', 1);
+        $returnUrl = $this->generateUrl('mautic_form_index', ['page' => $formPage]);
+
+        if (!$this->security->isAdmin() && !$this->security->isGranted('form:export:enable', 'MATCH_ONE')) {
+            $this->throwAccessDenied();
+        }
+
+        if (null === $form) {
+            // redirect back to form list
+            return $this->postActionRedirect(
+                [
+                    'returnUrl'       => $returnUrl,
+                    'viewParameters'  => ['page' => $formPage],
+                    'contentTemplate' => 'Mautic\FormBundle\Controller\FormController::indexAction',
+                    'passthroughVars' => [
+                        'activeLink'    => 'mautic_form_index',
+                        'mauticContent' => 'form',
+                    ],
+                    'flashes' => [
+                        [
+                            'type'    => 'error',
+                            'msg'     => 'mautic.form.error.notfound',
+                            'msgVars' => ['%id%' => $objectId],
+                        ],
+                    ],
+                ]
+            );
+        }
+        if (!$this->security->hasEntityAccess(
+            'form:forms:viewown',
+            'form:forms:viewother',
+            $form->getCreatedBy()
+        )
+        ) {
+            $this->throwAccessDenied();
+        }
+
+        $orderBy    = $session->get('mautic.formresult.'.$objectId.'.orderby', 's.date_submitted');
+        $orderByDir = $session->get('mautic.formresult.'.$objectId.'.orderbydir', 'DESC');
+        $filters    = $session->get('mautic.formresult.'.$objectId.'.filters', []);
+
+        $args = [
+            'limit'      => false,
+            'filter'     => ['force' => $filters],
+            'orderBy'    => $orderBy,
+            'orderByDir' => $orderByDir,
+            'form'       => $form,
+        ];
+
+        return $this->submissionModel->exportResults($format, $form, $args);
+    }
+
+    /**
+     * Delete a form result.
+     */
+    public function deleteAction(Request $request): Response
+    {
+        $formId   = $request->get('formId', 0);
+        $objectId = $request->get('objectId', 0);
+        $session  = $request->getSession();
+        $page     = $session->get('mautic.formresult.'.$formId.'.page', 1);
+        $flashes  = [];
+
+        if (Request::METHOD_POST === $request->getMethod()) {
+            // Find the result
+            $entity = $this->submissionModel->getEntity($objectId);
+
+            if (null === $entity) {
+                $flashes[] = [
+                    'type'    => 'error',
+                    'msg'     => 'mautic.form.error.notfound',
+                    'msgVars' => ['%id%' => $objectId],
+                ];
+            } elseif (!$this->security->hasEntityAccess('form:forms:editown', 'form:forms:editother', $entity->getCreatedBy())) {
+                $this->throwAccessDenied();
+            } else {
+                $id = $entity->getId();
+                $this->submissionModel->deleteEntity($entity);
+
+                $flashes[] = [
+                    'type'    => 'notice',
+                    'msg'     => 'mautic.core.notice.deleted',
+                    'msgVars' => [
+                        '%name%' => '#'.$id,
+                    ],
+                ];
+            }
+        } // else don't do anything
+
+        $viewParameters = [
+            'objectId' => $formId,
+            'page'     => $page,
+        ];
+
+        return $this->postActionRedirect(
+            [
+                'returnUrl'       => $this->generateUrl('mautic_form_results', $viewParameters),
+                'viewParameters'  => $viewParameters,
+                'contentTemplate' => 'Mautic\FormBundle\Controller\ResultController::indexAction',
+                'passthroughVars' => [
+                    'mauticContent' => 'formresult',
+                ],
+                'flashes' => $flashes,
+            ]
+        );
+    }
+
+    public function batchDeleteAction(Request $request): Response
+    {
+        return $this->batchDeleteStandard($request);
+    }
+
+    protected function getModelName(): string
+    {
+        return 'form.submission';
+    }
+
+    protected function getIndexRoute(): string
+    {
+        return 'mautic_form_results';
+    }
+
+    protected function getActionRoute(): string
+    {
+        return 'mautic_form_results_action';
+    }
+
+    /**
+     * Set the main form ID as the objectId.
+     */
+    protected function generateUrl(string $route, array $parameters = [], int $referenceType = UrlGeneratorInterface::ABSOLUTE_PATH): string
+    {
+        $formId = $this->getFormIdFromRequest($parameters);
+        switch ($route) {
+            case 'mautic_form_results_action':
+                $parameters['formId'] = $formId;
+                break;
+            case 'mautic_form_results':
+                $parameters['objectId'] = $formId;
+                break;
+        }
+
+        return parent::generateUrl($route, $parameters, $referenceType);
+    }
+
+    public function getPostActionRedirectArguments(array $args, $action): array
+    {
+        if ('batchDelete' === $action) {
+            $formId                             = $this->getFormIdFromRequest();
+            $args['viewParameters']['objectId'] = $formId;
+        }
+
+        return $args;
+    }
+
+    /**
+     * @return mixed
+     */
+    protected function getFormIdFromRequest(array $parameters = [])
+    {
+        $request = $this->getCurrentRequest();
+        if ($request->attributes->has('formId')) {
+            $formId = $request->attributes->get('formId');
+        } elseif ($request->request->has('formId')) {
+            $formId = $request->request->get('formId');
+        } else {
+            $objectId = (int) ($parameters['objectId'] ?? 0);
+            $formId   = $parameters['formId'] ?? $request->query->getInt('formId', $objectId);
+        }
+
+        return $formId;
+    }
+
+    public function addToSegmentAction(Request $request, int $objectId, FormModel $formModel, SubmissionModel $model, ListModel $segmentModel): Response
+    {
+        $form      = $formModel->getEntity($objectId);
+        $session   = $request->getSession();
+        $formPage  = $session->get('mautic.form.page', 1);
+        $returnUrl = $this->generateUrl('mautic_form_index', ['page' => $formPage]);
+
+        if (null === $form) {
+            return $this->postActionRedirect([
+                'returnUrl'       => $returnUrl,
+                'viewParameters'  => ['page' => $formPage],
+                'contentTemplate' => 'Mautic\\FormBundle\\Controller\\FormController::indexAction',
+                'passthroughVars' => [
+                    'activeLink'    => 'mautic_form_index',
+                    'mauticContent' => 'form',
+                ],
+                'flashes' => [
+                    [
+                        'type'    => 'error',
+                        'msg'     => 'mautic.form.error.notfound',
+                        'msgVars' => ['%id%' => $objectId],
+                    ],
+                ],
+            ]);
+        }
+        if (!$this->security->hasEntityAccess('form:forms:viewown', 'form:forms:viewother', $form->getCreatedBy())) {
+            $this->throwAccessDenied();
+        }
+
+        $orderBy    = $session->get('mautic.formresult.'.$objectId.'.orderby', 's.date_submitted');
+        $orderByDir = $session->get('mautic.formresult.'.$objectId.'.orderbydir', 'DESC');
+        $filters    = $session->get('mautic.formresult.'.$objectId.'.filters', []);
+
+        $viewOnlyFields = $formModel->getCustomComponents()['viewOnlyFields'];
+
+        $entities = $model->getEntities([
+            'limit'          => false,
+            'filter'         => ['force' => $filters],
+            'orderBy'        => $orderBy,
+            'orderByDir'     => $orderByDir,
+            'form'           => $form,
+            'viewOnlyFields' => $viewOnlyFields,
+            'simpleResults'  => true,
+        ]);
+
+        if (isset($entities['results'])) {
+            $entities = $entities['results'];
+        }
+
+        $contactIds = [];
+        foreach ($entities as $result) {
+            if (!empty($result['leadId'])) {
+                $contactIds[] = (int) $result['leadId'];
+            }
+        }
+
+        $contactIds = array_values(array_unique($contactIds));
+
+        $lists = $segmentModel->getUserLists();
+        $items = [];
+        foreach ($lists as $list) {
+            $items[$list['name'].' ('.$list['id'].')'] = $list['id'];
+        }
+
+        $route = $this->generateUrl('mautic_segment_batch_contact_set');
+
+        $formView = $this->createForm(
+            BatchType::class,
+            ['ids' => json_encode($contactIds)],
+            [
+                'items'  => $items,
+                'action' => $route,
+                'attr'   => [
+                    'data-submit-callback' => 'formResultBatchSubmit',
+                ],
+            ]
+        )->createView();
+
+        return $this->delegateView([
+            'viewParameters' => [
+                'form' => $formView,
+            ],
+            'contentTemplate' => '@MauticLead/Batch/form.html.twig',
+            'passthroughVars' => [
+                'activeLink'    => 'mautic_form_index',
+                'mauticContent' => 'formresult',
+                'route'         => $route,
+            ],
+        ]);
+    }
+}

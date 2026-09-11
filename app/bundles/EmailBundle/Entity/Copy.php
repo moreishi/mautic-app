@@ -1,0 +1,136 @@
+<?php
+
+namespace Mautic\EmailBundle\Entity;
+
+use Doctrine\ORM\Mapping as ORM;
+use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
+
+class Copy
+{
+    /**
+     * MD5 hash of the content.
+     *
+     * @var string
+     */
+    private $id;
+
+    /**
+     * @var \DateTimeInterface
+     */
+    private $dateCreated;
+
+    /**
+     * @var string|null
+     */
+    private $body;
+
+    private ?string $bodyText = null;
+
+    /**
+     * @var string|null
+     */
+    private $subject;
+
+    public static function loadMetadata(ORM\ClassMetadata $metadata): void
+    {
+        $builder = new ClassMetadataBuilder($metadata);
+
+        $builder->setTable('email_copies')
+            ->setCustomRepositoryClass(CopyRepository::class);
+
+        $builder->createField('id', 'string')
+            ->makePrimaryKey()
+            ->length(32)
+            ->build();
+
+        $builder->createField('dateCreated', 'datetime')
+            ->columnName('date_created')
+            ->build();
+
+        $builder->addNullableField('body', 'text');
+        $builder->addNullableField('bodyText', 'text', 'body_text');
+
+        $builder->addNullableField('subject', 'text');
+    }
+
+    public function setId($id): static
+    {
+        $this->id = $id;
+
+        return $this;
+    }
+
+    /**
+     * @return int
+     */
+    public function getId()
+    {
+        return $this->id;
+    }
+
+    /**
+     * @return \DateTimeInterface
+     */
+    public function getDateCreated()
+    {
+        return $this->dateCreated;
+    }
+
+    /**
+     * @param \DateTime $dateCreated
+     */
+    public function setDateCreated($dateCreated): static
+    {
+        $this->dateCreated = $dateCreated;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getBody()
+    {
+        return $this->body;
+    }
+
+    /**
+     * @param string $body
+     */
+    public function setBody($body): static
+    {
+        $this->body = $body;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getSubject()
+    {
+        return $this->subject;
+    }
+
+    /**
+     * @param mixed $subject
+     */
+    public function setSubject($subject): static
+    {
+        $this->subject = $subject;
+
+        return $this;
+    }
+
+    public function getBodyText(): ?string
+    {
+        return $this->bodyText;
+    }
+
+    public function setBodyText(?string $bodyText): self
+    {
+        $this->bodyText = $bodyText;
+
+        return $this;
+    }
+}

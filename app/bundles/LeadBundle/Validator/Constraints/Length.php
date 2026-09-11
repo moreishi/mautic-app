@@ -1,0 +1,16 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\LeadBundle\Validator\Constraints;
+
+use Symfony\Component\Validator\Constraints\Length as SymfonyLength;
+
+#[\Attribute(\Attribute::TARGET_PROPERTY | \Attribute::TARGET_METHOD | \Attribute::TARGET_CLASS)]
+final class Length extends SymfonyLength
+{
+    public function validatedBy(): string
+    {
+        return self::class.'Validator';
+    }
+}

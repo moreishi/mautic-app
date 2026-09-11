@@ -1,0 +1,199 @@
+{% set isIndex = tmpl == 'index' ? true : false %}
+{% set tmpl = 'list' %}
+
+{% extends isIndex ? '@MauticCore/Default/content.html.twig' : '@MauticCore/Default/raw_output.html.twig' %}
+{% block mauticContent %}stage{% endblock %}
+{% block headerTitle %}
+	{% trans %}mautic.stages.menu.root{% endtrans %}
+{% endblock %}
+
+{% block content %}
+{% if isIndex %}
+<div id="page-list-wrapper" class="{% if items|length > 0 or searchValue is not empty %}panel {% endif %}panel-default">
+    {{ include('@MauticCore/Helper/list_toolbar.html.twig', {
+        'searchValue': searchValue,
+        'searchScopes': searchScopes|default([]),
+        'searchScopeHint': searchScopeHint|default(null),
+        'action': currentRoute,
+        'page_actions': {
+            'templateButtons': {
+                'new': permissions['stage:stages:create'],
+            },
+            'routeBase': 'stage',
+        },
+        'bulk_actions': {
+            'routeBase': 'stage',
+            'templateButtons': {
+                'delete': permissions['stage:stages:delete']
+            }
+        },
+        'quickFilters': [
+            {
+                'search': 'mautic.core.searchcommand.ispublished',
+                'label': 'mautic.core.form.active',
+                'tooltip': 'mautic.core.searchcommand.ispublished.description',
+                'icon': 'ri-check-line'
+            },
+            {
+                'search': 'mautic.core.searchcommand.isunpublished',
+                'label': 'mautic.core.form.inactive',
+                'tooltip': 'mautic.core.searchcommand.isunpublished.description',
+                'icon': 'ri-close-line'
+            },
+            {
+                'search': 'mautic.core.searchcommand.isuncategorized',
+                'label': 'mautic.core.form.uncategorized',
+                'tooltip': 'mautic.core.searchcommand.isuncategorized.description',
+                'icon': 'ri-folder-unknow-line'
+            },
+            {
+                'search': 'mautic.core.searchcommand.ismine',
+                'label': 'mautic.core.searchcommand.ismine.label',
+                'tooltip': 'mautic.core.searchcommand.ismine.description',
+                'icon': 'ri-user-line'
+            }
+        ]
+    }) }}
+
+    <div class="page-list">
+        {{ block('listResults') }}
+    </div>
+</div>
+{% else %}
+    {{ block('listResults') }}
+{% endif %}
+{% endblock %}
+
+{% block listResults %}
+    {% if items is defined and items is not empty %}
+        <div class="table-responsive page-list">
+        <table class="table table-hover stage-list" id="stageTable">
+            <thead>
+            <tr>
+                {{- include('@MauticCore/Helper/tableheader.html.twig',
+                    {
+                        'checkall'        : 'true',
+                        'target'          : '#stageTable'
+                    }) -}}
+                    {{- include('@MauticCore/Helper/tableheader.html.twig',
+                    {
+                        'sessionVar' : 'stage',
+                        'orderBy'    : 's.name',
+                        'text'       : 'mautic.core.name',
+                        'class'      : 'col-stage-name',
+                        'default'    : true,
+                    }) -}}
+                    {{- include('@MauticCore/Helper/tableheader.html.twig',
+                    {
+                        'sessionVar' : 'stage',
+                        'orderBy'    : 'c.title',
+                        'text'       : 'mautic.core.category',
+                        'class'      : 'visible-md visible-lg col-stage-category',
+                    }) -}}
+                    {{- include('@MauticCore/Helper/tableheader.html.twig',
+                    {
+                        'sessionVar' : 'stage',
+                        'orderBy'    : 's.id',
+                        'text'       : 'mautic.core.id',
+                        'class'      : 'visible-md visible-lg col-stage-id',
+                    }) -}}
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in items %}
+                <tr>
+                    <td>
+                    {% set customButtons = [] %}
+                    {% if permissions['stage:stages:edit'] and permissions['stage:stages:delete'] %}
+                        {% set customButtons = [
+                            {
+                                'attr' : {
+                                    'data-toggle' : 'ajaxmodal',
+                                    'data-target' : '#MauticSharedModal',
+                                    'data-header' : 'mautic.stage.header.merge'|trans,
+                                    'href'        : path('mautic_stage_action', { 'objectId' : item.getId(), 'objectAction' : 'merge' }),
+                                },
+                                'btnText'   : 'mautic.stage.merge'|trans,
+                                'iconClass' : 'ri-flag-line',
+                                'priority'  : 100,
+                            }
+                        ] %}
+                    {% endif %}
+                    {{- include('@MauticCore/Helper/list_actions.html.twig',
+                            {
+                                'item'            : item,
+                                'templateButtons' : {
+                                    'edit'   : permissions['stage:stages:edit'],
+                                    'clone'  : permissions['stage:stages:create'],
+                                    'delete' : permissions['stage:stages:delete'],
+                                },
+                                'customButtons'   : customButtons,
+                                'routeBase' : 'stage',
+                            }) -}}
+                    </td>
+                    <td>
+                        <div>
+                            {{- include('@MauticCore/Helper/publishstatus_icon.html.twig',
+                                {'item' : item, 'model' : 'stage'}) -}}
+                            {% if permissions['stage:stages:edit'] %}
+                            <a href="{{ url(
+                                'mautic_stage_action',
+                                {'objectAction' : 'edit', 'objectId' : item.getId()}
+                            ) }}" data-toggle="ajax">
+                                {{ item.getName() }}
+                            </a>
+                            {% else %}
+                                {{ item.getName() }}
+                            {% endif %}
+                            {{ customContent('stage.name', _context) }}
+                        </div>
+                        {% set description = item.getDescription() %}
+                        {{ include('@MauticCore/Helper/description--inline.html.twig', {
+                            'description': description
+                        }) }}
+                    </td>
+                    <td class="visible-md visible-lg">
+                        {{ include('@MauticCore/Modules/category--expanded.html.twig', {'category': item.category}) }}
+                    </td>
+                    <td class="visible-md visible-lg">{{ item.getId() }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="panel-footer">
+        {{- include('@MauticCore/Helper/pagination.html.twig',
+            {
+                'totalItems' : items|length,
+                'page'       : page,
+                'limit'      : limit,
+                'menuLinkId' : 'mautic_stage_index',
+                'baseUrl'    : url('mautic_stage_index'),
+                'sessionVar' : 'stage',
+            }) -}}
+    </div>
+    {% else %}
+        {% if searchValue is not empty %}
+            {{- include('@MauticCore/Helper/noresults.html.twig',
+            {'tip' : 'mautic.stage.action.noresults.tip'}) -}}
+        {% else %}
+            <div class="mt-80 col-md-offset-2 col-lg-offset-3 col-md-8 col-lg-5 height-auto">
+                {% set childContainer %}
+                    <div class="mt-32 mb-md">
+                        {% include '@MauticCore/Components/pictogram.html.twig' with {
+                            'pictogram': 'progress',
+                            'size': '80'
+                        } %}
+                    </div>
+                {% endset %}
+
+                {{ include('@MauticCore/Components/content-block.html.twig', {
+                    heading: 'mautic.stage.contentblock.heading',
+                    subheading: 'mautic.stage.contentblock.subheading',
+                    copy: 'mautic.stage.contentblock.copy',
+                    childContainer: childContainer,
+                }) }}
+            </div>
+        {% endif %}
+    {% endif %}
+{% endblock %}

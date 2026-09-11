@@ -1,0 +1,454 @@
+<?php
+
+namespace Mautic\CoreBundle\Controller;
+
+use Mautic\CoreBundle\CoreEvents;
+use Mautic\CoreBundle\Event\CustomTemplateEvent;
+use Mautic\CoreBundle\Event\GlobalSearchEvent;
+use Mautic\CoreBundle\Exception\RecordCanNotUnpublishException;
+use Mautic\CoreBundle\Factory\IpLookupFactory;
+use Mautic\CoreBundle\Helper\InputHelper;
+use Mautic\CoreBundle\Helper\TokenSorter;
+use Mautic\CoreBundle\IpLookup\AbstractLocalDataLookup;
+use Mautic\CoreBundle\IpLookup\AbstractLookup;
+use Mautic\CoreBundle\IpLookup\IpLookupFormInterface;
+use Mautic\CoreBundle\Model\FormModel;
+use Mautic\CoreBundle\Model\NotificationModel;
+use Mautic\CoreBundle\Service\FlashBag;
+use Mautic\CoreBundle\Service\SearchCommandListInterface;
+use Symfony\Component\Form\FormFactoryInterface;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\PropertyAccess\PropertyAccess;
+use Symfony\Component\Security\Core\Authorization\AuthorizationCheckerInterface;
+use Symfony\Contracts\Service\Attribute\Required;
+
+class AjaxController extends CommonController
+{
+    private NotificationModel $notificationModel;
+
+    #[Required]
+    public function autowireCoreAjaxController(
+        NotificationModel $notificationModel,
+    ): void {
+        $this->notificationModel = $notificationModel;
+    }
+
+    /**
+     * @param int  $statusCode
+     * @param bool $addIgnoreWdt
+     *
+     * @throws \Exception
+     */
+    protected function sendJsonResponse(array $dataArray, $statusCode = null, $addIgnoreWdt = true): JsonResponse
+    {
+        $response = new JsonResponse();
+
+        if ('dev' == $this->getParameter('kernel.environment') && $addIgnoreWdt) {
+            $dataArray['ignore_wdt'] = 1;
+        }
+
+        if (null !== $statusCode) {
+            $response->setStatusCode($statusCode);
+        }
+
+        $response->setData($dataArray);
+
+        return $response;
+    }
+
+    /**
+     * Executes an action requested via ajax.
+     */
+    public function delegateAjaxAction(
+        Request $request,
+        AuthorizationCheckerInterface $authorizationChecker,
+    ): Response|JsonResponse {
+        // process ajax actions
+        $action     = $request->get('action');
+        $bundleName = null;
+        if (empty($action)) {
+            // check POST
+            $action = $request->request->get('action');
+        }
+
+        if ($authorizationChecker->isGranted('IS_AUTHENTICATED_REMEMBERED')) {
+            if (str_contains($action, ':')) {
+                // call the specified bundle's ajax action
+                $parts     = explode(':', $action);
+                $namespace = 'Mautic';
+
+                if (3 === count($parts) && 'plugin' == $parts['0']) {
+                    $namespace = 'MauticPlugin';
+                    array_shift($parts);
+                }
+
+                if (2 === count($parts)) {
+                    $bundleName = $parts[0];
+                    $bundle     = ucfirst($bundleName);
+                    $action     = $parts[1];
+
+                    if (!$classExists = class_exists($namespace.'\\'.$bundle.'Bundle\\Controller\\AjaxController')) {
+                        // Check if a plugin is prefixed with Mautic
+                        $bundle      = 'Mautic'.$bundle;
+                        $classExists = class_exists($namespace.'\\'.$bundle.'Bundle\\Controller\\AjaxController');
+                    }
+
+                    if ($classExists) {
+                        return $this->forwardWithPost(
+                            $namespace.'\\'.$bundle.'Bundle\\Controller\\AjaxController::executeAjaxAction',
+                            $request->request->all(),
+                            [
+                                'action'  => $action,
+                                'bundle'  => $bundleName,
+                            ],
+                            $request->query->all()
+                        );
+                    }
+                }
+            }
+
+            return $this->executeAjaxAction($request, $action, $bundleName);
+        }
+
+        return $this->sendJsonResponse(['success' => 0]);
+    }
+
+    public function executeAjaxAction(
+        Request $request,
+        $action,
+        $bundle = null,
+    ): Response|JsonResponse {
+        if (method_exists($this, $action.'Action')) {
+            return $this->forwardWithPost(
+                static::class.'::'.$action.'Action',
+                $request->request->all(),
+                [
+                    'action'  => $action,
+                    'bundle'  => $bundle,
+                ],
+                $request->query->all()
+            );
+        }
+
+        return $this->sendJsonResponse(['success' => 0]);
+    }
+
+    public function globalSearchAction(Request $request): JsonResponse
+    {
+        $dataArray = ['success' => 1];
+        $searchStr = $request->query->get('global_search', '');
+        $request->getSession()->set('mautic.global_search', $searchStr);
+
+        $event = new GlobalSearchEvent($searchStr, $this->translator);
+        $this->dispatcher->dispatch($event, CoreEvents::GLOBAL_SEARCH);
+
+        $dataArray['newContent'] = $this->renderView(
+            '@MauticCore/GlobalSearch/results.html.twig',
+            ['results' => $event->getResults()]
+        );
+
+        return $this->sendJsonResponse($dataArray);
+    }
+
+    public function commandListAction(Request $request): JsonResponse
+    {
+        $model      = InputHelper::clean($request->query->get('model'));
+        $commands   = $this->getModel($model)->getCommandList();
+        $dataArray  = [];
+        foreach ($commands as $k => $c) {
+            if (is_array($c)) {
+                foreach ($c as $subc) {
+                    $command = $this->translator->trans($k);
+                    $command = (!str_contains($command, ':')) ? $command.':' : $command;
+
+                    $dataArray[$command.$this->translator->trans($subc)] = ['value' => $command.$this->translator->trans($subc)];
+                }
+            } else {
+                $command = $this->translator->trans($c);
+                $command = (!str_contains($command, ':')) ? $command.':' : $command;
+
+                $dataArray[$command] = ['value' => $command];
+            }
+        }
+        sort($dataArray);
+
+        return $this->sendJsonResponse($dataArray);
+    }
+
+    public function globalCommandListAction(SearchCommandListInterface $searchCommandList): JsonResponse
+    {
+        $allCommands = $searchCommandList->getList();
+        $dataArray   = [];
+        $dupChecker  = [];
+        foreach ($allCommands as $commands) {
+            // @todo if/when figure out a way for typeahead dynamic headers
+            // $header = $translator->trans($header);
+            // $dataArray[$header] = array();
+            foreach ($commands as $k => $c) {
+                if (is_array($c)) {
+                    $command = $this->translator->trans($k);
+                    $command = (!str_contains($command, ':')) ? $command.':' : $command;
+
+                    foreach ($c as $subc) {
+                        $subcommand = $command.$this->translator->trans($subc);
+                        if (!in_array($subcommand, $dupChecker)) {
+                            $dataArray[]  = ['value' => $subcommand];
+                            $dupChecker[] = $subcommand;
+                        }
+                    }
+                } else {
+                    $command = $this->translator->trans($k);
+                    $command = (!str_contains($command, ':')) ? $command.':' : $command;
+
+                    if (!in_array($command, $dupChecker)) {
+                        $dataArray[]  = ['value' => $command];
+                        $dupChecker[] = $command;
+                    }
+                }
+            }
+            // sort($dataArray[$header]);
+        }
+        // ksort($dataArray);
+        sort($dataArray);
+
+        return $this->sendJsonResponse($dataArray);
+    }
+
+    public function togglePublishStatusAction(Request $request): JsonResponse
+    {
+        $dataArray      = ['success' => 0];
+        $name           = InputHelper::clean($request->request->get('model'));
+        $id             = InputHelper::clean($request->request->get('id'));
+        $customToggle   = InputHelper::clean($request->request->get('customToggle'));
+        $model          = $this->getModel($name);
+        $status         = Response::HTTP_OK;
+
+        $post = $request->request->all();
+        unset($post['model'], $post['id'], $post['action']);
+        if ([] !== $post) {
+            $extra = http_build_query($post);
+        } else {
+            $extra = '';
+        }
+
+        $entity = $model->getEntity($id);
+        if (null !== $entity) {
+            $permissionBase = $model->getPermissionBase();
+
+            $security  = $this->security;
+            $createdBy = (method_exists($entity, 'getCreatedBy')) ? $entity->getCreatedBy() : null;
+
+            if ($security->checkPermissionExists($permissionBase.':publishown')) {
+                $hasPermission = $security->hasEntityAccess($permissionBase.':publishown', $permissionBase.':publishother', $createdBy);
+            } elseif ($security->checkPermissionExists($permissionBase.':publish')) {
+                $hasPermission = $security->isGranted($permissionBase.':publish');
+            } elseif ($security->checkPermissionExists($permissionBase.':manage')) {
+                $hasPermission = $security->isGranted($permissionBase.':manage');
+            } elseif ($security->checkPermissionExists($permissionBase.':full')) {
+                $hasPermission = $security->isGranted($permissionBase.':full');
+            } elseif ($security->checkPermissionExists($permissionBase.':editown')) {
+                $hasPermission = $security->hasEntityAccess($permissionBase.':editown', $permissionBase.':editother', $createdBy);
+            } elseif ($security->checkPermissionExists($permissionBase.':edit')) {
+                $hasPermission = $security->isGranted($permissionBase.':edit');
+            } else {
+                $hasPermission = false;
+            }
+
+            if ($hasPermission) {
+                try {
+                    $dataArray['success'] = 1;
+                    // toggle permission state
+                    if ($customToggle) {
+                        $accessor = PropertyAccess::createPropertyAccessor();
+                        $accessor->setValue($entity, $customToggle, !$accessor->getValue($entity, $customToggle));
+                        $model->getRepository()->saveEntity($entity);
+                    } else {
+                        \assert($model instanceof FormModel);
+                        $refresh = $model->togglePublishStatus($entity);
+                    }
+                    if (!empty($refresh)) {
+                        $dataArray['reload'] = 1;
+                    } else {
+                        // get updated icon HTML
+                        $html = $this->renderView(
+                            '@MauticCore/Helper/publishstatus_icon.html.twig',
+                            [
+                                'item'  => $entity,
+                                'model' => $name,
+                                'query' => $extra,
+                                'size'  => $post['size'] ?? '',
+                            ]
+                        );
+                        $dataArray['statusHtml'] = $html;
+                    }
+                } catch (RecordCanNotUnpublishException $exception) {
+                    $this->addFlash(FlashBag::LEVEL_ERROR, $exception->getMessage());
+                    $status = Response::HTTP_UNPROCESSABLE_ENTITY;
+                }
+            } else {
+                $this->addFlashMessage('mautic.core.error.access.denied');
+                $status = Response::HTTP_FORBIDDEN;
+            }
+        }
+
+        $dataArray['flashes'] = $this->getFlashContent();
+
+        return $this->sendJsonResponse($dataArray, $status);
+    }
+
+    /**
+     * Unlock an entity locked by the current user.
+     */
+    public function unlockEntityAction(Request $request): JsonResponse
+    {
+        $dataArray   = ['success' => 0];
+        $name        = InputHelper::clean($request->request->get('model'));
+        $id          = (int) $request->request->get('id');
+        $extra       = InputHelper::clean($request->request->all()['parameter']);
+        $model       = $this->getModel($name);
+        $entity      = $model->getEntity($id);
+        $currentUser = $this->user;
+
+        if (method_exists($entity, 'getCheckedOutBy')) {
+            $checkedOut = $entity->getCheckedOutBy();
+            if (!empty($checkedOut) && $checkedOut === $currentUser->getId()) {
+                // entity exists, is checked out, and is checked out by the current user so go ahead and unlock
+                \assert($model instanceof FormModel);
+                $model->unlockEntity($entity, $extra);
+                $dataArray['success'] = 1;
+            }
+        }
+
+        return $this->sendJsonResponse($dataArray);
+    }
+
+    public function clearNotificationAction(Request $request): JsonResponse
+    {
+        $id = (int) $request->get('id', 0);
+        $this->notificationModel->clearNotification($id, 200);
+
+        return $this->sendJsonResponse(['success' => 1]);
+    }
+
+    public function getBuilderTokensAction(Request $request, TokenSorter $tokenSorter): JsonResponse
+    {
+        $builderComponents = [];
+
+        if (method_exists($this, 'getBuilderTokens')) {
+            $query             = $request->query->get('query', '');
+            $builderComponents = $this->getBuilderTokens($query);
+        }
+
+        if (array_key_exists('tokens', $builderComponents)) {
+            $builderComponents['tokens'] = $tokenSorter->sortTokens($builderComponents['tokens']);
+        }
+
+        return $this->sendJsonResponse($builderComponents);
+    }
+
+    /**
+     * Fetch remote data store.
+     */
+    public function downloadIpLookupDataStoreAction(Request $request, IpLookupFactory $ipServiceFactory): JsonResponse
+    {
+        $dataArray = ['success' => 0];
+
+        if ($request->request->has('service')) {
+            $serviceName = $request->request->get('service');
+            $serviceAuth = $request->request->get('auth');
+
+            $ipService = $ipServiceFactory->getService($serviceName, $serviceAuth);
+
+            if ($ipService instanceof AbstractLocalDataLookup) {
+                if ($ipService->downloadRemoteDataStore()) {
+                    $dataArray['success'] = 1;
+                    $dataArray['message'] = $this->translator->trans('mautic.core.success');
+                } else {
+                    $remoteUrl = $ipService->getRemoteDateStoreDownloadUrl();
+                    $localPath = $ipService->getLocalDataStoreFilepath();
+
+                    if ($remoteUrl && $localPath) {
+                        $dataArray['error'] = $this->translator->trans(
+                            'mautic.core.ip_lookup.remote_fetch_error',
+                            [
+                                '%remoteUrl%' => AbstractLocalDataLookup::cleanUrl($remoteUrl),
+                                '%localPath%' => $localPath,
+                            ]
+                        );
+                    } else {
+                        $dataArray['error'] = $this->translator->trans(
+                            'mautic.core.ip_lookup.remote_fetch_error_generic'
+                        );
+                    }
+                }
+            }
+        }
+
+        return $this->sendJsonResponse($dataArray);
+    }
+
+    /**
+     * Fetch IP Lookup form.
+     */
+    public function getIpLookupFormAction(Request $request, FormFactoryInterface $formFactory, IpLookupFactory $ipServiceFactory): JsonResponse
+    {
+        $dataArray = ['html' => '', 'attribution' => ''];
+
+        if ($request->query->has('service')) {
+            $serviceName = $request->query->get('service');
+
+            $ipService = $ipServiceFactory->getService($serviceName);
+
+            if ($ipService instanceof AbstractLookup) {
+                $dataArray['attribution'] = $ipService->getAttribution();
+                if ($ipService instanceof IpLookupFormInterface) {
+                    if ($formType = $ipService->getConfigFormService()) {
+                        $themes   = $ipService->getConfigFormThemes();
+                        $themes[] = '@MauticCore/FormTheme/Config/config_layout.html.twig';
+
+                        $form = $formFactory->createBuilder()
+                            ->add(
+                                'ip_lookup_config',
+                                $formType,
+                                [
+                                    'label'             => false,
+                                    'ip_lookup_service' => $ipService,
+                                    'csrf_protection'   => false,
+                                ]
+                            )
+                            ->getForm();
+
+                        $html = $this->renderView(
+                            '@MauticCore/Default/ajax_form.html.twig',
+                            [
+                                'form'       => $form->createView(),
+                                'formThemes' => $themes,
+                            ]
+                        );
+
+                        $html              = str_replace($formType.'_', 'config_coreconfig_ip_lookup_config_', $html);
+                        $html              = str_replace($formType, 'config[coreconfig][ip_lookup_config]', $html);
+                        $dataArray['html'] = $html;
+                    }
+                }
+            }
+        }
+
+        return $this->sendJsonResponse($dataArray);
+    }
+
+    /**
+     * @param mixed[] $parameters
+     */
+    protected function renderView(string $view, array $parameters = []): string
+    {
+        $event = $this->dispatcher->dispatch(
+            new CustomTemplateEvent($this->getCurrentRequest(), $view, $parameters),
+            CoreEvents::VIEW_INJECT_CUSTOM_TEMPLATE
+        );
+
+        return parent::renderView($event->getTemplate(), $event->getVars());
+    }
+}

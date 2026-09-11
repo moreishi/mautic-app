@@ -1,0 +1,38 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\PointBundle\Event;
+
+use Mautic\CoreBundle\Event\CommonEvent;
+use Mautic\LeadBundle\Entity\Lead;
+use Mautic\PointBundle\Entity\Point;
+
+final class PointActionEvent extends CommonEvent
+{
+    public function __construct(
+        private Point $point,
+        private Lead $lead,
+    ) {
+    }
+
+    public function getPoint(): Point
+    {
+        return $this->point;
+    }
+
+    public function setPoint(Point $point): void
+    {
+        $this->point = $point;
+    }
+
+    public function getLead(): Lead
+    {
+        return $this->lead;
+    }
+
+    public function setLead(Lead $lead): void
+    {
+        $this->lead = $lead;
+    }
+}

@@ -1,0 +1,48 @@
+<?php
+
+namespace Mautic\EmailBundle\DataFixtures\ORM;
+
+use Doctrine\Common\DataFixtures\AbstractFixture;
+use Doctrine\Common\DataFixtures\OrderedFixtureInterface;
+use Doctrine\Persistence\ObjectManager;
+use Mautic\CoreBundle\Helper\CsvHelper;
+use Mautic\CoreBundle\Helper\Serializer;
+use Mautic\EmailBundle\Entity\Email;
+use Mautic\EmailBundle\Entity\EmailRepository;
+
+final class LoadEmailData extends AbstractFixture implements OrderedFixtureInterface
+{
+    public function __construct(
+        private readonly EmailRepository $emailRepository,
+    ) {
+    }
+
+    public function load(ObjectManager $manager): void
+    {
+        $emails = CsvHelper::csv_to_array(__DIR__.'/fakeemaildata.csv');
+
+        foreach ($emails as $count => $rows) {
+            $email = new Email();
+            $email->setDateAdded(new \DateTime());
+            $key = $count + 1;
+            foreach ($rows as $col => $val) {
+                if ('NULL' != $val) {
+                    $setter = 'set'.ucfirst($col);
+                    if (in_array($col, ['content', 'variantSettings'])) {
+                        $val = Serializer::decode(stripslashes($val));
+                    }
+                    $email->{$setter}($val);
+                }
+            }
+            $email->addList($this->getReference('lead-list'));
+
+            $this->emailRepository->saveEntity($email);
+            $this->setReference('email-'.$key, $email);
+        }
+    }
+
+    public function getOrder(): int
+    {
+        return 9;
+    }
+}

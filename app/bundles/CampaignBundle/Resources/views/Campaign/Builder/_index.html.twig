@@ -1,0 +1,105 @@
+{#
+  Variables
+    - event
+    - campaignId
+#}
+{% set route = route|default('mautic_campaignevent_action') %}
+{% set decisionTileContent %}
+<h3 class="type-heading-02 mb-lg">{{ 'mautic.campaign.event.decision.header'|trans }}</h3>
+<div class="type-helper-text-01 mb-32">{{ 'mautic.campaign.event.decision.descr'|trans }}</div>
+{% endset %}
+
+{% set actionTileContent %}
+<h3 class="type-heading-02 mb-lg">{{ 'mautic.campaign.event.action.header'|trans }}</h3>
+<div class="type-helper-text-01 mb-32">{{ 'mautic.campaign.event.action.descr'|trans }}</div>
+{% endset %}
+
+{% set conditionTileContent %}
+<h3 class="type-heading-02 mb-lg">{{ 'mautic.campaign.event.condition.header'|trans }}</h3>
+<div class="type-helper-text-01 mb-32">{{ 'mautic.campaign.event.condition.descr'|trans }}</div>
+{% endset %}
+
+{% set cloneTileContent %}
+<h3 class="type-heading-02 mb-lg">{{ 'mautic.campaign.event.clone.header'|trans }}</h3>
+<div class="type-helper-text-01 campaign-paste-detail">
+    <span>{{ 'mautic.campaign.event.clone.name'|trans }}: </span><span data-campaign-event-clone="sourceEventName"></span>
+</div>
+<div class="type-helper-text-01 campaign-paste-detail">
+    <span>{{ 'mautic.campaign.event.clone.from'|trans }}: </span><span data-campaign-event-clone="sourceCampaignName"></span>
+</div>
+{% endset %}
+
+<div class="hide" id="CampaignEventPanel">
+    <div id="CampaignEventPanelGroups">
+        <div class="row">
+            <div class="mr-0 ml-0 pl-xs pr-xs campaign-group-container col-md-4" id="DecisionGroupSelector">
+                {% include '@MauticCore/Components/tile.html.twig' with {
+                    'type': 'clickable',
+                    'content': decisionTileContent,
+                    'icon': 'ri-node-tree',
+                    'attributes': {
+                        'data-type': 'Decision'
+                    }
+                } %}
+            </div>
+            <div class="mr-0 ml-0 pl-xs pr-xs campaign-group-container col-md-4" id="ActionGroupSelector">
+                {% include '@MauticCore/Components/tile.html.twig' with {
+                    'type': 'clickable',
+                    'content': actionTileContent,
+                    'icon': 'ri-function-add-line',
+                    'attributes': {
+                        'data-type': 'Action'
+                    }
+                } %}
+            </div>
+            <div class="mr-0 ml-0 pl-xs pr-xs campaign-group-container col-md-4" id="ConditionGroupSelector">
+                {% include '@MauticCore/Components/tile.html.twig' with {
+                    'type': 'clickable',
+                    'content': conditionTileContent,
+                    'icon': 'ri-filter-3-line',
+                    'attributes': {
+                        'data-type': 'Condition'
+                    }
+                } %}
+            </div>
+        </div>
+        <div class="row">
+            <div class="mr-0 ml-0 pl-xs pr-xs mt-sm campaign-group-container col-md-12">
+                <div id="CampaignPasteContainer">
+                    {% include '@MauticCore/Components/tile.html.twig' with {
+                        'type': 'clickable',
+                        'content': cloneTileContent,
+                        'icon': 'ri-file-copy-line',
+                        'href': path(route, {
+                            'objectAction': 'insert',
+                            'campaignId': campaignId,
+                            'anchor': 'none',
+                            'anchorEventType': 'none'
+                        }),
+                        'attributes': {
+                            'data-campaign-event-insert-button': 'true',
+                            'data-toggle': 'ajax',
+                            'data-target': 'CampaignEvent_',
+                            'data-ignore-formexit': 'true',
+                            'data-method': 'POST',
+                            'data-hide-loadingbar': 'true',
+                            'aria-label': 'mautic.campaign.event.clone.insert'|trans
+                        }
+                    } %}
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="CampaignEventPanelLists" class="hide">
+        {{- include('@MauticCampaign/Campaign/Builder/_source_list.html.twig', {
+              'campaignSources': campaignSources,
+              'campaignId': campaignId,
+        }) -}}
+
+        {{- include('@MauticCampaign/Campaign/Builder/_event_list.html.twig', {
+              'eventSettings': eventSettings,
+              'campaignId': campaignId,
+        }) -}}
+    </div>
+</div>
+<div class="clearfix"></div>

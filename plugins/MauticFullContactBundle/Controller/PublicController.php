@@ -1,0 +1,409 @@
+<?php
+
+namespace MauticPlugin\MauticFullContactBundle\Controller;
+
+use Mautic\CoreBundle\Model\NotificationModel;
+use Mautic\FormBundle\Controller\FormController;
+use Mautic\LeadBundle\Entity\Company;
+use Mautic\LeadBundle\Entity\CompanyRepository;
+use Mautic\LeadBundle\Entity\Lead;
+use Mautic\LeadBundle\Entity\LeadRepository;
+use Mautic\LeadBundle\Model\CompanyModel;
+use Mautic\LeadBundle\Model\LeadModel;
+use Mautic\UserBundle\Entity\User;
+use Mautic\UserBundle\Model\UserModel;
+use MauticPlugin\MauticFullContactBundle\Helper\LookupHelper;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Contracts\Service\Attribute\Required;
+
+final class PublicController extends FormController
+{
+    private CompanyRepository $companyRepository;
+
+    private LeadRepository $leadRepository;
+
+    private CompanyModel $companyModel;
+
+    private LeadModel $leadModel;
+
+    private NotificationModel $notificationModel;
+
+    private UserModel $userModel;
+
+    #[Required]
+    public function autowirePublicController(
+        LeadModel $leadModel,
+        CompanyModel $companyModel,
+        NotificationModel $notificationModel,
+        UserModel $userModel,
+        LeadRepository $leadRepository,
+        CompanyRepository $companyRepository,
+    ): void {
+        $this->leadModel = $leadModel;
+        $this->companyModel = $companyModel;
+        $this->notificationModel = $notificationModel;
+        $this->userModel = $userModel;
+        $this->leadRepository = $leadRepository;
+        $this->companyRepository = $companyRepository;
+    }
+
+    /**
+     * Write a notification.
+     *
+     * @param string $message   Message of the notification
+     * @param string $header    Header for message
+     * @param string $iconClass CSS class for the icon (e.g. ri-eye-line)
+     * @param User   $user      User object; defaults to current user
+     */
+    public function addNewNotification($message, $header, $iconClass, User $user): void
+    {
+        $this->notificationModel->addNotification($message, 'FullContact', false, $header, $iconClass, null, $user);
+    }
+
+    /**
+     * @throws \InvalidArgumentException
+     */
+    public function callbackAction(Request $request, LookupHelper $lookupHelper, LoggerInterface $mauticLogger): Response
+    {
+        if (!$request->request->has('result') || !$request->request->has('webhookId')) {
+            return new Response('ERROR');
+        }
+
+        $result           = json_decode($request->request->all()['result'] ?? [], true);
+        $oid              = $request->request->get('webhookId', '');
+        $validatedRequest = $lookupHelper->validateRequest($oid);
+
+        if (!$validatedRequest || !is_array($result)) {
+            return new Response('ERROR');
+        }
+
+        if ('company' == $validatedRequest['type']) {
+            return $this->compcallbackAction($mauticLogger, $result, $validatedRequest);
+        }
+
+        $notify = $validatedRequest['notify'];
+
+        try {
+            /** @var Lead $lead */
+            $lead       = $validatedRequest['entity'];
+            $currFields = $lead->getFields(true);
+
+            $org = [];
+            if (array_key_exists('organizations', $result)) {
+                /** @var array $organizations */
+                $organizations = $result['organizations'];
+                foreach ($organizations as $organization) {
+                    if (array_key_exists('isPrimary', $organization) && !empty($organization['isPrimary'])) {
+                        $org = $organization;
+                        break;
+                    }
+                }
+
+                if (0 === count($org) && 0 !== count($result['organizations'])) {
+                    // primary not found, use the first one if exists
+                    $org = $result['organizations'][0];
+                }
+            }
+
+            $loc = [];
+            if (array_key_exists('demographics', $result)
+                && array_key_exists(
+                    'locationDeduced',
+                    $result['demographics']
+                )
+            ) {
+                $loc = $result['demographics']['locationDeduced'];
+            }
+
+            $data = [];
+            /** @var array $socialProfiles */
+            $socialProfiles = [];
+            if (array_key_exists('socialProfiles', $result)) {
+                $socialProfiles = $result['socialProfiles'];
+            }
+            foreach (['facebook', 'foursquare', 'instagram', 'linkedin', 'twitter'] as $p) {
+                foreach ($socialProfiles as $socialProfile) {
+                    if (array_key_exists('type', $socialProfile) && $socialProfile['type'] === $p && empty($currFields[$p]['value'])) {
+                        $data[$p] = array_key_exists('url', $socialProfile) ? $socialProfile['url'] : '';
+                        break;
+                    }
+                }
+            }
+
+            if (array_key_exists('contactInfo', $result)) {
+                if (array_key_exists(
+                    'familyName',
+                    $result['contactInfo']
+                )
+                    && empty($currFields['lastname']['value'])
+                ) {
+                    $data['lastname'] = $result['contactInfo']['familyName'];
+                }
+
+                if (array_key_exists(
+                    'givenName',
+                    $result['contactInfo']
+                )
+                    && empty($currFields['firstname']['value'])
+                ) {
+                    $data['firstname'] = $result['contactInfo']['givenName'];
+                }
+
+                if ((array_key_exists('websites', $result['contactInfo'])
+                        && count(
+                            $result['contactInfo']['websites']
+                        ))
+                    && empty($currFields['website']['value'])
+                ) {
+                    $data['website'] = $result['contactInfo']['websites'][0]['url'];
+                }
+
+                if ((array_key_exists('chats', $result['contactInfo'])
+                        && array_key_exists(
+                            'skype',
+                            $result['contactInfo']['chats']
+                        ))
+                    && empty($currFields['skype']['value'])
+                ) {
+                    $data['skype'] = $result['contactInfo']['chats']['skype']['handle'];
+                }
+            }
+
+            if (array_key_exists('name', $org) && empty($currFields['company']['value'])) {
+                $data['company'] = $org['name'];
+            }
+
+            if (array_key_exists('title', $org) && empty($currFields['position']['value'])) {
+                $data['position'] = $org['title'];
+            }
+
+            if ((array_key_exists('city', $loc)
+                    && array_key_exists(
+                        'name',
+                        $loc['city']
+                    ))
+                && empty($currFields['city']['value'])
+            ) {
+                $data['city'] = $loc['city']['name'];
+            }
+
+            if ((array_key_exists('state', $loc)
+                    && array_key_exists(
+                        'name',
+                        $loc['state']
+                    ))
+                && empty($currFields['state']['value'])
+            ) {
+                $data['state'] = $loc['state']['name'];
+            }
+
+            if ((array_key_exists('country', $loc)
+                    && array_key_exists(
+                        'name',
+                        $loc['country']
+                    ))
+                && empty($currFields['country']['value'])
+            ) {
+                $data['country'] = $loc['country']['name'];
+            }
+
+            $mauticLogger->log('debug', 'SET FIELDS: '.print_r($data, true));
+
+            // Unset the nonce so that it's not used again
+            $socialCache = $lead->getSocialCache();
+            unset($socialCache['fullcontact']['nonce']);
+            $lead->setSocialCache($socialCache);
+
+            $this->leadModel->setFieldValues($lead, $data);
+            $this->leadRepository->saveEntity($lead);
+
+            if ($notify && (!$lead->imported)) {
+                if ($user = $this->userModel->getEntity($notify)) {
+                    $this->addNewNotification(
+                        sprintf($this->translator->trans('mautic.plugin.fullcontact.contact_retrieved'), $lead->getEmail()),
+                        'FullContact Plugin',
+                        'ri-search-line',
+                        $user
+                    );
+                }
+            }
+        } catch (\Exception $ex) {
+            try {
+                if ($notify && $lead && (!$lead->imported)) {
+                    if ($user = $this->userModel->getEntity($notify)) {
+                        $this->addNewNotification(
+                            sprintf(
+                                $this->translator->trans('mautic.plugin.fullcontact.unable'),
+                                $lead->getEmail(),
+                                $ex->getMessage()
+                            ),
+                            'FullContact Plugin',
+                            'ri-error-warning-line',
+                            $user
+                        );
+                    }
+                }
+            } catch (\Exception $ex2) {
+                $mauticLogger->log('error', 'FullContact: '.$ex2->getMessage());
+            }
+        }
+
+        return new Response('OK');
+    }
+
+    /**
+     * This is only called internally.
+     *
+     * @param mixed[] $result
+     * @param mixed[] $validatedRequest
+     *
+     * @throws \InvalidArgumentException
+     */
+    private function compcallbackAction(LoggerInterface $mauticLogger, array $result, array $validatedRequest): Response
+    {
+        $notify = $validatedRequest['notify'];
+
+        try {
+            /** @var Company $company */
+            $company    = $validatedRequest['entity'];
+            $currFields = $company->getFields(true);
+
+            $org   = [];
+            $loc   = [];
+            $phone = [];
+            $fax   = [];
+            $email = [];
+            if (array_key_exists('organization', $result)) {
+                $org = $result['organization'];
+                if (array_key_exists('contactInfo', $result['organization'])) {
+                    if (array_key_exists('addresses', $result['organization']['contactInfo'])
+                        && count(
+                            $result['organization']['contactInfo']['addresses']
+                        )
+                    ) {
+                        $loc = $result['organization']['contactInfo']['addresses'][0];
+                    }
+                    if (array_key_exists('emailAddresses', $result['organization']['contactInfo'])
+                        && count(
+                            $result['organization']['contactInfo']['emailAddresses']
+                        )
+                    ) {
+                        $email = $result['organization']['contactInfo']['emailAddresses'][0];
+                    }
+                    if (array_key_exists('phoneNumbers', $result['organization']['contactInfo'])
+                        && count(
+                            $result['organization']['contactInfo']['phoneNumbers']
+                        )
+                    ) {
+                        $phone = $result['organization']['contactInfo']['phoneNumbers'][0];
+                        foreach ($result['organization']['contactInfo']['phoneNumbers'] as $phoneNumber) {
+                            if (array_key_exists('label', $phoneNumber)
+                                && 0 >= stripos(
+                                    $phoneNumber['label'],
+                                    'fax'
+                                )
+                            ) {
+                                $fax = $phoneNumber;
+                            }
+                        }
+                    }
+                }
+            }
+
+            $data = [];
+
+            if (array_key_exists('addressLine1', $loc) && empty($currFields['companyaddress1']['value'])) {
+                $data['companyaddress1'] = $loc['addressLine1'];
+            }
+
+            if (array_key_exists('addressLine2', $loc) && empty($currFields['companyaddress2']['value'])) {
+                $data['companyaddress2'] = $loc['addressLine2'];
+            }
+
+            if (array_key_exists('value', $email) && empty($currFields['companyemail']['value'])) {
+                $data['companyemail'] = $email['value'];
+            }
+
+            if (array_key_exists('number', $phone) && empty($currFields['companyphone']['value'])) {
+                $data['companyphone'] = $phone['number'];
+            }
+
+            if (array_key_exists('locality', $loc) && empty($currFields['companycity']['value'])) {
+                $data['companycity'] = $loc['locality'];
+            }
+
+            if (array_key_exists('postalCode', $loc) && empty($currFields['companyzipcode']['value'])) {
+                $data['companyzipcode'] = $loc['postalCode'];
+            }
+
+            if (array_key_exists('region', $loc) && empty($currFields['companystate']['value'])) {
+                $data['companystate'] = $loc['region']['name'];
+            }
+
+            if (array_key_exists('country', $loc) && empty($currFields['companycountry']['value'])) {
+                $data['companycountry'] = $loc['country']['name'];
+            }
+
+            if (array_key_exists('name', $org) && empty($currFields['companydescription']['value'])) {
+                $data['companydescription'] = $org['name'];
+            }
+
+            if (array_key_exists(
+                'approxEmployees',
+                $org
+            )
+                && empty($currFields['companynumber_of_employees']['value'])
+            ) {
+                $data['companynumber_of_employees'] = $org['approxEmployees'];
+            }
+
+            if (array_key_exists('number', $fax) && empty($currFields['companyfax']['value'])) {
+                $data['companyfax'] = $fax['number'];
+            }
+
+            $mauticLogger->log('debug', 'SET FIELDS: '.print_r($data, true));
+
+            // Unset the nonce so that it's not used again
+            $socialCache = $company->getSocialCache();
+            unset($socialCache['fullcontact']['nonce']);
+            $company->setSocialCache($socialCache);
+
+            $this->companyModel->setFieldValues($company, $data);
+            $this->companyRepository->saveEntity($company);
+
+            if ($notify) {
+                if ($user = $this->userModel->getEntity($notify)) {
+                    $this->addNewNotification(
+                        sprintf($this->translator->trans('mautic.plugin.fullcontact.company_retrieved'), $company->getName()),
+                        'FullContact Plugin',
+                        'ri-search-line',
+                        $user
+                    );
+                }
+            }
+        } catch (\Exception $ex) {
+            try {
+                if ($notify && $company) {
+                    if ($user = $this->userModel->getEntity($notify)) {
+                        $this->addNewNotification(
+                            sprintf(
+                                $this->translator->trans('mautic.plugin.fullcontact.unable'),
+                                $company->getName(),
+                                $ex->getMessage()
+                            ),
+                            'FullContact Plugin',
+                            'ri-error-warning-line',
+                            $user
+                        );
+                    }
+                }
+            } catch (\Exception $ex2) {
+                $mauticLogger->log('error', 'FullContact: '.$ex2->getMessage());
+            }
+        }
+
+        return new Response('OK');
+    }
+}

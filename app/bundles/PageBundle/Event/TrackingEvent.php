@@ -1,0 +1,38 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\PageBundle\Event;
+
+use Mautic\LeadBundle\Entity\Lead;
+use Symfony\Component\HttpFoundation\ParameterBag;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Contracts\EventDispatcher\Event;
+
+final class TrackingEvent extends Event
+{
+    private readonly ParameterBag $response;
+
+    public function __construct(
+        private readonly Lead $contact,
+        private readonly Request $request,
+        array $mtcSessionResponses,
+    ) {
+        $this->response = new ParameterBag($mtcSessionResponses);
+    }
+
+    public function getContact(): Lead
+    {
+        return $this->contact;
+    }
+
+    public function getRequest(): Request
+    {
+        return $this->request;
+    }
+
+    public function getResponse(): ParameterBag
+    {
+        return $this->response;
+    }
+}

@@ -1,0 +1,50 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\ReportBundle\Model;
+
+use Doctrine\ORM\EntityManagerInterface;
+use Mautic\ReportBundle\Entity\Report;
+use Mautic\ReportBundle\Entity\Scheduler;
+use Mautic\ReportBundle\Entity\SchedulerRepository;
+use Mautic\ReportBundle\Scheduler\Model\SchedulerPlanner;
+use Mautic\ReportBundle\Scheduler\Option\ExportOption;
+
+class ScheduleModel
+{
+    public function __construct(
+        private readonly EntityManagerInterface $entityManager,
+        private readonly SchedulerPlanner $schedulerPlanner,
+        private readonly SchedulerRepository $schedulerRepository,
+    ) {
+    }
+
+    /**
+     * Avoid the default AbstractCommonModel::getRepository() as it caches it to a static property.
+     */
+    public function getRepository(): SchedulerRepository
+    {
+        return $this->schedulerRepository;
+    }
+
+    /**
+     * @return Scheduler[]
+     */
+    public function getScheduledReportsForExport(ExportOption $exportOption)
+    {
+        return $this->schedulerRepository->getScheduledReportsForExport($exportOption);
+    }
+
+    public function reportWasScheduled(Report $report): void
+    {
+        $this->schedulerPlanner->computeScheduler($report);
+    }
+
+    public function turnOffScheduler(Report $report): void
+    {
+        $report->setIsScheduled(false);
+        $this->entityManager->persist($report);
+        $this->entityManager->flush();
+    }
+}

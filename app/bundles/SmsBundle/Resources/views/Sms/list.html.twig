@@ -1,0 +1,222 @@
+{% set isIndex = tmpl == 'index' ? true : false %}
+{% set tmpl = 'list' %}
+{% extends isIndex ? '@MauticCore/Default/content.html.twig' : '@MauticCore/Default/raw_output.html.twig' %}
+{% block mauticContent %}sms{% endblock %}
+{% block headerTitle %}{{ 'mautic.sms.smses'|trans }}{% endblock %}
+{% block content %}
+    {% if isIndex %}
+    <div id="page-list-wrapper" class="{% if items|length > 0 or searchValue is not empty %}panel {% endif %}panel-default">
+        {{- include('@MauticCore/Helper/list_toolbar.html.twig', {
+            'searchValue': searchValue,
+            'searchId': 'sms-search',
+            'action': currentRoute,
+            'page_actions': {
+                'templateButtons': {
+                    'new': permissions['sms:smses:create']
+                },
+                'routeBase': 'sms'
+            },
+            'quickFilters': [
+                {
+                    'search': 'mautic.core.searchcommand.ispublished',
+                    'label': 'mautic.core.form.available',
+                    'tooltip': 'mautic.core.searchcommand.ispublished.description',
+                    'icon': 'ri-check-line'
+                },
+                {
+                    'search': 'mautic.core.searchcommand.isunpublished',
+                    'label': 'mautic.core.form.unavailable',
+                    'tooltip': 'mautic.core.searchcommand.isunpublished.description',
+                    'icon': 'ri-close-line'
+                },
+                {
+                    'search': 'mautic.core.searchcommand.isuncategorized',
+                    'label': 'mautic.core.form.uncategorized',
+                    'tooltip': 'mautic.core.searchcommand.isuncategorized.description',
+                    'icon': 'ri-folder-unknow-line'
+                },
+                {
+                    'search': 'mautic.core.searchcommand.ismine',
+                    'label': 'mautic.core.searchcommand.ismine.label',
+                    'tooltip': 'mautic.core.searchcommand.ismine.description',
+                    'icon': 'ri-user-line'
+                }
+            ]
+        }) -}}
+
+        <div class="page-list">
+            {{ block('listResults') }}
+        </div>
+    </div>
+
+    {{ include('@MauticCore/Modules/protip.html.twig', {
+        tip: random(['mautic.protip.sms.concise', 'mautic.protip.sms.timesensitive', 'mautic.protip.sms.compliance'])
+    }) }}
+    {% else %}
+		{{ block('listResults') }}
+	{% endif %}
+{% endblock %}
+
+{% block listResults %}
+{% if items|length > 0 %}
+    <div class="table-responsive">
+        <table class="table table-hover sms-list">
+            <thead>
+            <tr>
+                {{- include(
+                    '@MauticCore/Helper/tableheader.html.twig',
+                    {
+                        'checkall'        : 'true',
+                        'routeBase'       : 'sms',
+                        'templateButtons' : {
+                            'delete' : permissions['sms:smses:deleteown'] or permissions['sms:smses:deleteother'],
+                        }
+                    }
+                ) -}}
+
+                {{- include(
+                    '@MauticCore/Helper/tableheader.html.twig',
+                    {
+                        'sessionVar' : 'sms',
+                        'orderBy'    : 'e.name',
+                        'text'       : 'mautic.core.name',
+                        'class'      : 'col-sms-name',
+                        'default'    : true,
+                    }
+                ) -}}
+
+                {{- include(
+                    '@MauticCore/Helper/tableheader.html.twig',
+                    {
+                        'sessionVar' : 'sms',
+                        'orderBy'    : 'c.title',
+                        'text'       : 'mautic.core.category',
+                        'class'      : 'visible-md visible-lg col-sms-category',
+                    }
+                ) -}}
+
+                <th class="visible-sm visible-md visible-lg col-sms-stats">{{ 'mautic.core.stats'|trans }}</th>
+
+                {{- include(
+                    '@MauticCore/Helper/tableheader.html.twig',
+                    {
+                        'sessionVar' : 'sms',
+                        'orderBy'    : 'e.id',
+                        'text'       : 'mautic.core.id',
+                        'class'      : 'visible-md visible-lg col-sms-id',
+                    }
+                ) -}}
+            </tr>
+            </thead>
+            <tbody>
+            {# @var item \Mautic\SmsBundle\Entity\Sms #}
+            {% for item in items %}
+                {% set type = item.getSmsType() %}
+                {% set media = item.getMedia() %}
+                <tr>
+                    <td>
+                        {% set edit = securityHasEntityAccess(
+                            permissions['sms:smses:editown'],
+                            permissions['sms:smses:editother'],
+                            item.getCreatedBy()
+                        ) %}
+                        {% set customButtons = [
+                            {
+                                'attr' : {
+                                    'data-toggle' : 'ajaxmodal',
+                                    'data-target' : '#MauticSharedModal',
+                                    'data-header' : 'mautic.sms.smses.header.preview'|trans,
+                                    'data-footer' : 'false',
+                                    'href'        : path('mautic_sms_action', { 'objectId' : item.getId(), 'objectAction' : 'preview' }),
+                                },
+                                'btnText'   : 'mautic.sms.preview'|trans,
+                                'iconClass' : 'ri-share-forward-box-fill',
+                            }
+                        ] %}
+                        {{- include(
+                            '@MauticCore/Helper/list_actions.html.twig',
+                            {
+                                'item'            : item,
+                                'templateButtons' : {
+                                    'edit'   : edit,
+                                    'clone'  : permissions['sms:smses:create'],
+                                    'delete' : securityHasEntityAccess(
+                                        permissions['sms:smses:deleteown'],
+                                        permissions['sms:smses:deleteother'],
+                                        item.getCreatedBy()
+                                    ),
+                                },
+                                'routeBase'     : 'sms',
+                                'customButtons' : customButtons,
+                            }
+                        ) -}}
+                    </td>
+                    <td>
+                        <div>
+                            {{- include('@MauticCore/Helper/publishstatus_icon.html.twig',
+                                {
+                                    'item'  : item,
+                                    'model' : 'sms',
+                                }
+                            ) -}}
+                            <a href="{{ path('mautic_sms_action', {'objectAction' : 'view', 'objectId' : item.getId()}) }}" data-toggle="ajax">
+                                {{ item.getName() }}
+                                {% if item.isTranslation() %}
+                                    <span data-toggle="tooltip" title="{{ 'mautic.core.icon_tooltip.translation'|trans }}"><i class="ri-fw ri-translate fs-14"></i></span>
+                                {% endif %}
+                                {% if 'list' == type %}
+                                    <span data-toggle="tooltip" title="{{ 'mautic.sms.icon_tooltip.list_sms'|trans }}">
+                                        <i class="ri-pie-chart-line fs-14"></i>
+                                    </span>
+                                {% endif %}
+                                {% if media is not empty %}
+                                    <span data-toggle="tooltip" title="{{ 'mautic.sms.icon_tooltip.has_media'|trans }}"><i class="ri-file-image-line"></i></span>
+                                {% endif %}
+                            </a>
+                            {{ include('@MauticProject/Modules/projects.html.twig') }}
+                        </div>
+                    </td>
+                    <td class="visible-md visible-lg">
+                        {{ include('@MauticCore/Modules/category--expanded.html.twig', {'category': item.getCategory()}) }}
+                    </td>
+                        {{- include('@MauticSms/Sms/list_stats.html.twig', { 'item' : item }) -}}
+                    <td class="visible-md visible-lg">{{ item.getId() }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="panel-footer">
+        {{- include('@MauticCore/Helper/pagination.html.twig', {
+            'totalItems' : totalItems,
+            'page'       : page,
+            'limit'      : limit,
+            'baseUrl'    : path('mautic_sms_index'),
+            'sessionVar' : 'sms',
+        }) -}}
+    </div>
+{% elseif not configured %}
+    {{- include('@MauticCore/Helper/noresults.html.twig', { 'header' : 'mautic.sms.disabled', 'message' : 'mautic.sms.enable.in.configuration' }) -}}
+{% else %}
+    {% if searchValue is not empty %}
+        {{- include('@MauticCore/Helper/noresults.html.twig', {'tip' : 'mautic.category.noresults.tip'}) -}}
+    {% else %}
+        <div class="mt-80 col-md-offset-2 col-lg-offset-3 col-md-8 col-lg-5 height-auto">
+            {% set childContainer %}
+                <div class="mt-32 mb-md">
+                    {% include '@MauticCore/Components/pictogram.html.twig' with {
+                        'pictogram': 'mobile--chat',
+                        'size': '80'
+                    } %}
+                </div>
+            {% endset %}
+            {% include '@MauticCore/Components/content-block.html.twig' with {
+                heading: 'mautic.sms.contentblock.heading',
+                subheading: 'mautic.sms.contentblock.subheading',
+                copy: 'mautic.sms.contentblock.copy',
+                childContainer: childContainer
+            } %}
+        </div>
+    {% endif %}
+{% endif %}
+{% endblock %}

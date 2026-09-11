@@ -1,0 +1,15 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\CoreBundle\Controller;
+
+use Symfony\Component\HttpFoundation\Response;
+
+final class KeepAliveController
+{
+    public function keepAliveAction(): Response
+    {
+        return new Response('', 200);
+    }
+}

@@ -1,0 +1,168 @@
+{#
+#}
+{{ includeScript('plugins/MauticFocusBundle/Assets/js/focus.js') }}
+{% if items|length > 0 %}
+    <div class="table-responsive page-list">
+        <table class="table table-hover focus-list" id="focusTable">
+            <thead>
+            <tr>
+                {{ include('@MauticCore/Helper/tableheader.html.twig', {
+                    'checkall': 'true',
+                    'target': '#focusTable',
+                }) }}
+
+                {{ include('@MauticCore/Helper/tableheader.html.twig', {
+                        'sessionVar': 'focus',
+                        'orderBy': 'f.name',
+                        'text': 'mautic.core.name',
+                        'class': 'col-focus-name',
+                        'default': true,
+                }) }}
+
+                {{ include('@MauticCore/Helper/tableheader.html.twig', {
+                        'sessionVar': 'focus',
+                        'orderBy': 'c.title',
+                        'text': 'mautic.core.category',
+                        'class': 'visible-md visible-lg col-focus-category',
+                }) }}
+
+                {{ include('@MauticCore/Helper/tableheader.html.twig', {
+                        'sessionVar': 'focus',
+                        'orderBy': 'f.type',
+                        'text': 'mautic.focus.thead.type',
+                        'class': 'visible-md visible-lg col-focus-type',
+                }) }}
+
+                {{ include('@MauticCore/Helper/tableheader.html.twig', {
+                        'sessionVar': 'focus',
+                        'orderBy': 'f.style',
+                        'text': 'mautic.focus.thead.style',
+                        'class': 'visible-md visible-lg col-focus-style',
+                }) }}
+
+                {{ include('@MauticCore/Helper/tableheader.html.twig', {
+                        'sessionVar': 'focus',
+                        'orderBy': 'f.id',
+                        'text': 'mautic.core.id',
+                        'class': 'visible-md visible-lg col-focus-id',
+                }) }}
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in items %}
+                <tr>
+                    <td>
+                        {{ include('@MauticCore/Helper/list_actions.html.twig', {
+                                'item': item,
+                                'templateButtons': {
+                                    'edit': securityHasEntityAccess(permissions['focus:items:editown'], permissions['focus:items:editother'], item.createdBy),
+                                    'clone': permissions['focus:items:create'],
+                                    'delete': securityHasEntityAccess(permissions['focus:items:deleteown'], permissions['focus:items:deleteother'], item.createdBy),
+                                },
+                                'routeBase': 'focus',
+                        }) }}
+                    </td>
+                    <td>
+                        <div>
+                            {{ include('@MauticCore/Helper/publishstatus_icon.html.twig', {'item': item, 'model': 'focus'}) }}
+                            <a data-toggle="ajax" href="{{ path('mautic_focus_action', {'objectId': item.id, 'objectAction': 'view'}) }}">
+                                {{ item.name }}
+                            </a>
+                            {{ include('@MauticProject/Modules/projects.html.twig') }}
+                        </div>
+                        {{ include('@MauticCore/Helper/description--inline.html.twig', {
+                            'description': item.description
+                        }) }}
+                    </td>
+                    <td class="visible-md visible-lg">
+                        {{ include('@MauticCore/Modules/category--expanded.html.twig', {'category': item.category}) }}
+                    </td>
+                    <td class="visible-md visible-lg">{{ ('mautic.focus.type.' ~ item.type)|trans }}</td>
+                    <td class="visible-md visible-lg">{{ ('mautic.focus.style.' ~ item.style)|trans }}</td>
+                    <td class="visible-md visible-lg">{{ item.id }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="panel-footer">
+        {{ include('@MauticCore/Helper/pagination.html.twig', {
+                'totalItems': items|length,
+                'page': page,
+                'limit': limit,
+                'baseUrl': path('mautic_focus_index'),
+                'sessionVar': 'focus',
+        }) }}
+    </div>
+{% else %}
+    {% if searchValue is not empty %}
+        {{ include('@MauticCore/Helper/noresults.html.twig', {'tip': 'mautic.focus.noresults.tip'}) }}
+    {% else %}
+        <div class="mt-80 col-md-offset-2 col-lg-offset-3 col-md-8 col-lg-5 height-auto">
+            {% set childContainer %}
+                <div class="mb-md">
+                    {% include '@MauticCore/Components/pictogram.html.twig' with {
+                        'pictogram': 'spotlight',
+                        'size': '80'
+                    } %}
+                </div>
+
+                {{ include('@MauticCore/Components/content-item-row.html.twig', {
+                    type: 'default',
+                    eyebrow: 'mautic.focus.onboarding.eyebrow',
+                    heading: 'mautic.focus.onboarding.purpose.heading',
+                    copy: 'mautic.focus.onboarding.purpose.copy',
+                }) }}
+                
+                {% set focusFeaturesContainer %}
+                <div class="row">
+                    <div class="col-sm-6 col-xs-12">
+                        {{ include('@MauticCore/Components/content-item.html.twig', {
+                            type: 'pictogram',
+                            pictogram: 'web--banners',
+                            heading: 'mautic.focus.onboarding.style.bar.heading',
+                            copy: 'mautic.focus.onboarding.style.bar.copy',
+                        }) }}
+                    </div>
+                    <div class="col-sm-6 col-xs-12">
+                        {{ include('@MauticCore/Components/content-item.html.twig', {
+                            type: 'pictogram',
+                            pictogram: 'design-and-development--01',
+                            heading: 'mautic.focus.onboarding.style.modal.heading',
+                            copy: 'mautic.focus.onboarding.style.modal.copy',
+                        }) }}
+                    </div>
+                    <div class="col-sm-6 col-xs-12">
+                        {{ include('@MauticCore/Components/content-item.html.twig', {
+                            type: 'pictogram',
+                            pictogram: 'notifications',
+                            heading: 'mautic.focus.onboarding.style.notification.heading',
+                            copy: 'mautic.focus.onboarding.style.notification.copy',
+                        }) }}
+                    </div>
+                    <div class="col-sm-6 col-xs-12">
+                        {{ include('@MauticCore/Components/content-item.html.twig', {
+                            type: 'pictogram',
+                            pictogram: 'maximize',
+                            heading: 'mautic.focus.onboarding.style.fullpage.heading',
+                            copy: 'mautic.focus.onboarding.style.fullpage.copy',
+                        }) }}
+                    </div>
+                </div>
+                {% endset %}
+
+                {{ include('@MauticCore/Components/content-group.html.twig', {
+                    heading: 'mautic.focus.onboarding.styles.heading',
+                    childContainer: focusFeaturesContainer,
+                }) }}
+                {% endset %}
+                
+                {{ include('@MauticCore/Components/content-block.html.twig', {
+                    heading: 'mautic.focus.onboarding.heading',
+                    subheading: 'mautic.focus.onboarding.subheading',
+                    copy: '',
+                childContainer: childContainer,
+            }) }}
+        </div>
+    {% endif %}
+{% endif %}

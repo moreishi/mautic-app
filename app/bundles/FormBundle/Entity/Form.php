@@ -1,0 +1,978 @@
+<?php
+
+namespace Mautic\FormBundle\Entity;
+
+use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\Delete;
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\Patch;
+use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Put;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
+use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Mapping as ORM;
+use Mautic\ApiBundle\Serializer\Driver\ApiMetadataDriver;
+use Mautic\CategoryBundle\Entity\Category;
+use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
+use Mautic\CoreBundle\Entity\FormEntity;
+use Mautic\CoreBundle\Entity\UuidInterface;
+use Mautic\CoreBundle\Entity\UuidTrait;
+use Mautic\CoreBundle\Helper\InputHelper;
+use Mautic\FormBundle\Validator\Constraint\IsPostActionRedirectUrl;
+use Mautic\ProjectBundle\Entity\ProjectTrait;
+use Symfony\Component\Serializer\Attribute\Groups;
+use Symfony\Component\Validator\Constraints as Assert;
+use Symfony\Component\Validator\Mapping\ClassMetadata;
+
+#[ApiResource(
+    operations: [
+        new GetCollection(security: "is_granted('form:forms:viewown')"),
+        new Post(security: "is_granted('form:forms:create')"),
+        new Get(security: "is_granted('form:forms:viewown', object)"),
+        new Put(security: "is_granted('form:forms:editown', object)"),
+        new Patch(security: "is_granted('form:forms:editother', object)"),
+        new Delete(security: "is_granted('form:forms:deleteown', object)"),
+    ],
+    normalizationContext: [
+        'groups'                  => ['form:read'],
+        'swagger_definition_name' => 'Read',
+        'api_included'            => ['category', 'fields', 'actions'],
+    ],
+    denormalizationContext: [
+        'groups'                  => ['form:write'],
+        'swagger_definition_name' => 'Write',
+    ]
+)]
+class Form extends FormEntity implements UuidInterface
+{
+    use UuidTrait;
+
+    use ProjectTrait;
+
+    public const ENTITY_NAME = 'forms';
+
+    public const TABLE_NAME  = 'forms';
+
+    /**
+     * @var int
+     */
+    #[Groups(['form:read', 'download:read', 'campaign:read', 'email:read'])]
+    private $id;
+
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private ?string $language = null;
+
+    /**
+     * @var string
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $name;
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $formAttributes;
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $description;
+
+    /**
+     * @var string
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $alias;
+
+    /**
+     * @var Category|null
+     */
+    #[Groups(['form:read', 'form:write', 'campaign:read', 'email:read'])]
+    private $category;
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['form:read', 'download:read', 'campaign:read', 'email:read'])]
+    private $cachedHtml;
+
+    /**
+     * @var string
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $postAction = 'message';
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $postActionProperty;
+
+    /**
+     * @var \DateTimeInterface
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $publishUp;
+
+    /**
+     * @var \DateTimeInterface
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $publishDown;
+
+    /**
+     * @var ArrayCollection<int, Field>
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $fields;
+
+    /**
+     * @var ArrayCollection<string, Action>
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $actions;
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $template;
+
+    /**
+     * @var bool|null
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $inKioskMode = false;
+
+    /**
+     * @var bool|null
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $renderStyle = false;
+
+    /**
+     * @var Collection<int, Submission>
+     */
+    #[Groups(['form:read', 'download:read', 'campaign:read', 'email:read'])]
+    private Collection $submissions;
+
+    #[Groups(['form:read', 'download:read', 'campaign:read', 'email:read'])]
+    public int $submission_count = 0;
+
+    /**
+     * @var string|null
+     *
+     * @deprecated since Mautic 7.1, will be removed in 8.0. Form types are no longer used.
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $formType = 'standalone';
+
+    /**
+     * @var bool|null
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $noIndex = true;
+
+    /**
+     * @var int|null
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private $progressiveProfilingLimit;
+
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private ?int $submissionLimit = null;
+
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read', 'email:read'])]
+    private ?string $submissionLimitMessage = null;
+
+    private int $submissionCount = 0;
+
+    /**
+     * This var is used to cache the result once gained from the loop.
+     *
+     * @var bool
+     */
+    #[Groups(['form:read', 'form:write', 'download:read', 'campaign:read'])]
+    private $usesProgressiveProfiling;
+
+    public function __clone()
+    {
+        $this->id = null;
+
+        parent::__clone();
+    }
+
+    public function __construct()
+    {
+        $this->fields      = new ArrayCollection();
+        $this->actions     = new ArrayCollection();
+        $this->submissions = new ArrayCollection();
+        $this->initializeProjects();
+    }
+
+    public static function loadMetadata(ORM\ClassMetadata $metadata): void
+    {
+        $builder = new ClassMetadataBuilder($metadata);
+
+        $builder->setTable('forms')
+            ->setCustomRepositoryClass(FormRepository::class);
+
+        $builder->addIdColumns();
+
+        $builder->addField('alias', 'string');
+
+        $builder->createField('language', 'string')
+            ->columnName('lang')
+            ->nullable()
+            ->build();
+
+        $builder->addNullableField('formAttributes', 'string', 'form_attr');
+
+        $builder->addCategory();
+
+        $builder->createField('cachedHtml', 'text')
+            ->columnName('cached_html')
+            ->nullable()
+            ->build();
+
+        $builder->createField('postAction', 'string')
+            ->columnName('post_action')
+            ->build();
+
+        $builder->createField('postActionProperty', Types::TEXT)
+            ->columnName('post_action_property')
+            ->nullable()
+            ->build();
+
+        $builder->addPublishDates();
+
+        $builder->createOneToMany('fields', 'Field')
+            ->setIndexBy('id')
+            ->setOrderBy(['order' => 'ASC', 'id' => 'ASC'])
+            ->mappedBy('form')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createOneToMany('actions', 'Action')
+            ->setIndexBy('id')
+            ->setOrderBy(['order' => 'ASC'])
+            ->mappedBy('form')
+            ->cascadeAll()
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->createField('template', 'string')
+            ->nullable()
+            ->build();
+
+        $builder->createField('inKioskMode', 'boolean')
+            ->columnName('in_kiosk_mode')
+            ->nullable()
+            ->build();
+
+        $builder->createField('renderStyle', 'boolean')
+            ->columnName('render_style')
+            ->nullable()
+            ->build();
+
+        $builder->createOneToMany('submissions', 'Submission')
+            ->setOrderBy(['dateSubmitted' => 'DESC'])
+            ->mappedBy('form')
+            ->fetchExtraLazy()
+            ->build();
+
+        $builder->addNullableField('submissionLimit', Types::INTEGER, 'submission_limit');
+        $builder->createField('submissionLimitMessage', Types::TEXT)
+            ->columnName('submission_limit_message')
+            ->nullable()
+            ->build();
+        $builder->createField('submissionCount', Types::INTEGER)
+            ->columnName('submission_count')
+            ->build();
+
+        $builder->addNullableField('formType', 'string', 'form_type');
+
+        $builder->createField('noIndex', 'boolean')
+            ->columnName('no_index')
+            ->nullable()
+            ->build();
+
+        $builder->addNullableField('progressiveProfilingLimit', Types::INTEGER, 'progressive_profiling_limit');
+
+        static::addUuidField($builder);
+        self::addProjectsField($builder, 'form_projects_xref', 'form_id');
+    }
+
+    public static function loadValidatorMetadata(ClassMetadata $metadata): void
+    {
+        $metadata->addPropertyConstraint('name', new Assert\NotBlank(message: 'mautic.core.name.required', groups: ['form']));
+
+        $metadata->addPropertyConstraint('postActionProperty', new Assert\NotBlank(message: 'mautic.form.form.postactionproperty_message.notblank', groups: ['messageRequired']));
+
+        $metadata->addPropertyConstraint('postActionProperty', new Assert\NotBlank(message: 'mautic.form.form.postactionproperty_redirect.notblank', groups: ['urlRequired']));
+
+        $metadata->addPropertyConstraint('postActionProperty', new IsPostActionRedirectUrl(groups: ['urlRequired']));
+
+        $metadata->addPropertyConstraint('postActionProperty', new Assert\NotBlank(message: 'mautic.form.form.postactionproperty_hideform.notblank', groups: ['hideformRequired']));
+
+        $metadata->addPropertyConstraint('progressiveProfilingLimit', new Assert\GreaterThan(value: 0, message: 'mautic.form.form.progressive_profiling_limit.error', groups: ['progressiveProfilingLimit']));
+    }
+
+    public static function determineValidationGroups(\Symfony\Component\Form\Form $form): array
+    {
+        $data   = $form->getData();
+        $groups = ['form'];
+
+        $postAction = $data->getPostAction();
+
+        if ('message' == $postAction) {
+            $groups[] = 'messageRequired';
+        } elseif ('redirect' == $postAction) {
+            $groups[] = 'urlRequired';
+        } elseif ('hideform' == $postAction) {
+            $groups[] = 'hideformRequired';
+        }
+
+        if ('' != $data->getProgressiveProfilingLimit()) {
+            $groups[] = 'progressiveProfilingLimit';
+        }
+
+        return $groups;
+    }
+
+    /**
+     * Prepares the metadata for API usage.
+     */
+    public static function loadApiMetadata(ApiMetadataDriver $metadata): void
+    {
+        $metadata->setGroupPrefix('form')
+            ->addListProperties(
+                [
+                    'id',
+                    'name',
+                    'alias',
+                    'category',
+                ],
+            )
+            ->addProperties(
+                [
+                    'description',
+                    'cachedHtml',
+                    'publishUp',
+                    'publishDown',
+                    'fields',
+                    'actions',
+                    'template',
+                    'inKioskMode',
+                    'renderStyle',
+                    'formType',
+                    'postAction',
+                    'postActionProperty',
+                    'noIndex',
+                    'formAttributes',
+                    'language',
+                ],
+            )
+            ->build();
+
+        self::addProjectsInLoadApiMetadata($metadata, 'form');
+    }
+
+    protected function isChanged($prop, $val): void
+    {
+        if ('actions' == $prop || 'fields' == $prop) {
+            // changes are already computed so just add them
+            $this->changes[$prop][$val[0] ?? ''] = $val[1];
+        } else {
+            parent::isChanged($prop, $val);
+        }
+    }
+
+    /**
+     * @return int|null
+     */
+    public function getId()
+    {
+        return $this->id;
+    }
+
+    /**
+     * @param string $name
+     */
+    public function setName($name): static
+    {
+        $this->isChanged('name', $name);
+        $this->name = $name;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getName()
+    {
+        return $this->name;
+    }
+
+    /**
+     * @param string $description
+     */
+    public function setDescription($description): static
+    {
+        $this->isChanged('description', $description);
+        $this->description = $description;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getDescription($truncate = false, $length = 45)
+    {
+        if ($truncate) {
+            if (strlen($this->description) > $length) {
+                return substr($this->description, 0, $length).'...';
+            }
+        }
+
+        return $this->description;
+    }
+
+    /**
+     * @param string $cachedHtml
+     */
+    public function setCachedHtml($cachedHtml): static
+    {
+        $this->cachedHtml = $cachedHtml;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getCachedHtml()
+    {
+        return $this->cachedHtml;
+    }
+
+    /**
+     * @return bool|null
+     */
+    public function getRenderStyle()
+    {
+        return $this->renderStyle;
+    }
+
+    /**
+     * @param string $postAction
+     */
+    public function setPostAction($postAction): static
+    {
+        $this->isChanged('postAction', $postAction);
+        $this->postAction = $postAction;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getPostAction()
+    {
+        return $this->postAction;
+    }
+
+    /**
+     * @param string $postActionProperty
+     */
+    public function setPostActionProperty($postActionProperty): static
+    {
+        $this->isChanged('postActionProperty', $postActionProperty);
+        $this->postActionProperty = $postActionProperty;
+
+        return $this;
+    }
+
+    public function getPostActionProperty(): ?string
+    {
+        if ('return' === $this->postAction) {
+            return null;
+        }
+
+        return $this->postActionProperty;
+    }
+
+    public function getResultCount(): int
+    {
+        return count($this->submissions);
+    }
+
+    /**
+     * @param \DateTime $publishUp
+     */
+    public function setPublishUp($publishUp): static
+    {
+        $this->isChanged('publishUp', $publishUp);
+        $this->publishUp = $publishUp;
+
+        return $this;
+    }
+
+    /**
+     * @return \DateTimeInterface|null
+     */
+    public function getPublishUp()
+    {
+        return $this->publishUp;
+    }
+
+    /**
+     * @param \DateTime $publishDown
+     */
+    public function setPublishDown($publishDown): static
+    {
+        $this->isChanged('publishDown', $publishDown);
+        $this->publishDown = $publishDown;
+
+        return $this;
+    }
+
+    /**
+     * @return \DateTimeInterface|null
+     */
+    public function getPublishDown()
+    {
+        return $this->publishDown;
+    }
+
+    /**
+     * @param int|string $key
+     */
+    public function addField($key, Field $field): static
+    {
+        if ($changes = $field->getChanges()) {
+            $this->isChanged('fields', [$key, $changes]);
+        }
+        $this->fields[$key] = $field;
+
+        return $this;
+    }
+
+    /**
+     * @param int|string $key
+     */
+    public function removeField($key, Field $field): void
+    {
+        if ($changes = $field->getChanges()) {
+            $this->isChanged('fields', [$key, $changes]);
+        }
+        $this->fields->removeElement($field);
+    }
+
+    /**
+     * @return ArrayCollection<int, Field>
+     */
+    public function getFields()
+    {
+        return $this->fields;
+    }
+
+    public function getFieldAliases(): array
+    {
+        $aliases = [];
+        $fields  = $this->fields;
+
+        if ($fields) {
+            foreach ($fields as $field) {
+                $aliases[] = $field->getAlias();
+            }
+        }
+
+        return $aliases;
+    }
+
+    /**
+     * Loops through the form fields and returns an array of fields with mapped data.
+     *
+     * @return array<int, array<string, int|string>>
+     */
+    public function getMappedFieldValues(): array
+    {
+        return array_filter(
+            array_map(
+                fn (Field $field): array => [
+                    'formFieldId'  => $field->getId(),
+                    'mappedObject' => $field->getMappedObject(),
+                    'mappedField'  => $field->getMappedField(),
+                ],
+                $this->fields->getValues(),
+            ),
+            fn (array $elem): bool => isset($elem['mappedObject']) && isset($elem['mappedField']),
+        );
+    }
+
+    /**
+     * Loops trough the form fields and returns a simple array of mapped object keys if any.
+     *
+     * @return string[]
+     */
+    public function getMappedFieldObjects(): array
+    {
+        return array_values(
+            array_filter(
+                array_unique(
+                    $this->fields->map(
+                        fn (Field $field): ?string => $field->getMappedObject(),
+                    )->toArray(),
+                ),
+            ),
+        );
+    }
+
+    /**
+     * @param string $alias
+     */
+    public function setAlias($alias): static
+    {
+        $this->isChanged('alias', $alias);
+        $this->alias = $alias;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getAlias()
+    {
+        return $this->alias;
+    }
+
+    public function addSubmission(Submission $submissions): static
+    {
+        $this->submissions[] = $submissions;
+
+        return $this;
+    }
+
+    public function removeSubmission(Submission $submissions): void
+    {
+        $this->submissions->removeElement($submissions);
+    }
+
+    /**
+     * @return Collection<int, Submission>
+     */
+    public function getSubmissions(): Collection
+    {
+        return $this->submissions;
+    }
+
+    /**
+     * @param int|string $key
+     */
+    public function addAction($key, Action $action): static
+    {
+        if ($changes = $action->getChanges()) {
+            $this->isChanged('actions', [$key, $changes]);
+        }
+        $this->actions[$key] = $action;
+
+        return $this;
+    }
+
+    public function removeAction(Action $action): void
+    {
+        $this->actions->removeElement($action);
+    }
+
+    /**
+     * Removes all actions.
+     */
+    public function clearActions(): void
+    {
+        $this->actions = new ArrayCollection();
+    }
+
+    /**
+     * @return ArrayCollection<string, Action>
+     */
+    public function getActions()
+    {
+        return $this->actions;
+    }
+
+    /**
+     * @return Category|null
+     */
+    public function getCategory()
+    {
+        return $this->category;
+    }
+
+    /**
+     * @param mixed $category
+     */
+    public function setCategory($category): void
+    {
+        $this->category = $category;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getTemplate()
+    {
+        return $this->template;
+    }
+
+    /**
+     * @param mixed $template
+     */
+    public function setTemplate($template): void
+    {
+        $this->template = $template;
+    }
+
+    /**
+     * @return bool
+     */
+    public function getInKioskMode()
+    {
+        return $this->inKioskMode;
+    }
+
+    /**
+     * @param mixed $inKioskMode
+     */
+    public function setInKioskMode($inKioskMode): void
+    {
+        $this->inKioskMode = $inKioskMode;
+    }
+
+    /**
+     * @param mixed $renderStyle
+     */
+    public function setRenderStyle($renderStyle): void
+    {
+        $this->renderStyle = $renderStyle;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isInKioskMode()
+    {
+        return $this->inKioskMode;
+    }
+
+    /**
+     * @deprecated since Mautic 7.1, will be removed in 8.0. Form types are no longer used.
+     *
+     * @return string|null
+     */
+    public function getFormType()
+    {
+        trigger_deprecation('mautic/mautic', '7.1', 'Form::getFormType() is deprecated and will be removed in 8.0.');
+
+        return $this->formType;
+    }
+
+    /**
+     * @deprecated since Mautic 7.1, will be removed in 8.0. Form types are no longer used.
+     *
+     * @param mixed $formType
+     */
+    public function setFormType($formType): static
+    {
+        trigger_deprecation('mautic/mautic', '7.1', 'Form::setFormType() is deprecated and will be removed in 8.0.');
+        $this->formType = $formType;
+
+        return $this;
+    }
+
+    /**
+     * @param bool|null $noIndex
+     */
+    public function setNoIndex($noIndex): void
+    {
+        $sanitizedNoIndex = null === $noIndex ? null : (bool) $noIndex;
+        $this->isChanged('noIndex', $sanitizedNoIndex);
+        $this->noIndex = $sanitizedNoIndex;
+    }
+
+    /**
+     * @return bool|null
+     */
+    public function getNoIndex()
+    {
+        return $this->noIndex;
+    }
+
+    /**
+     * @param string $formAttributes
+     */
+    public function setFormAttributes($formAttributes): static
+    {
+        $this->isChanged('formAttributes', $formAttributes);
+        $this->formAttributes = $formAttributes;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getFormAttributes()
+    {
+        return $this->formAttributes;
+    }
+
+    public function setLanguage(?string $language): self
+    {
+        $this->isChanged('language', $language);
+        $this->language = $language;
+
+        return $this;
+    }
+
+    public function getLanguage(): ?string
+    {
+        return $this->language;
+    }
+
+    /**
+     * @deprecated since Mautic 7.1, will be removed in 8.0. All forms can now be used in campaigns.
+     */
+    public function isStandalone(): bool
+    {
+        trigger_deprecation('mautic/mautic', '7.1', 'Form::isStandalone() is deprecated and will be removed in 8.0.');
+
+        return 'campaign' != $this->formType;
+    }
+
+    /**
+     * Generate a form name for HTML attributes.
+     *
+     * @param string[] $allowedCharacters
+     */
+    public function generateFormName(?string $name = null, array $allowedCharacters = []): string
+    {
+        $name = strtolower(
+            InputHelper::alphanum(
+                InputHelper::transliterate(
+                    $name ?? $this->name
+                ),
+                false,
+                null,
+                $allowedCharacters
+            )
+        );
+
+        return (empty($name)) ? 'form-'.$this->id : $name;
+    }
+
+    /**
+     * Check if some Progressive Profiling setting is turned on on any of the form fields.
+     *
+     * @return bool
+     */
+    public function usesProgressiveProfiling()
+    {
+        if (null !== $this->usesProgressiveProfiling) {
+            return $this->usesProgressiveProfiling;
+        }
+
+        // Progressive profiling must be turned off in the kiosk mode
+        if (false === $this->inKioskMode) {
+            if ('' != $this->progressiveProfilingLimit) {
+                $this->usesProgressiveProfiling = true;
+
+                return $this->usesProgressiveProfiling;
+            }
+
+            // Search for a field with a progressive profiling setting on
+            foreach ($this->fields->toArray() as $field) {
+                if (false === $field->getShowWhenValueExists() || $field->getShowAfterXSubmissions() > 0) {
+                    $this->usesProgressiveProfiling = true;
+
+                    return $this->usesProgressiveProfiling;
+                }
+            }
+        }
+
+        $this->usesProgressiveProfiling = false;
+
+        return $this->usesProgressiveProfiling;
+    }
+
+    /**
+     * @param int $progressiveProfilingLimit
+     */
+    public function setProgressiveProfilingLimit($progressiveProfilingLimit): static
+    {
+        $this->isChanged('progressiveProfilingLimit', $progressiveProfilingLimit);
+        $this->progressiveProfilingLimit = $progressiveProfilingLimit;
+
+        return $this;
+    }
+
+    /**
+     * @return int|null
+     */
+    public function getProgressiveProfilingLimit()
+    {
+        return $this->progressiveProfilingLimit;
+    }
+
+    public function setSubmissionLimit(?int $submissionLimit): self
+    {
+        $this->isChanged('submissionLimit', $submissionLimit);
+        $this->submissionLimit = $submissionLimit;
+
+        return $this;
+    }
+
+    public function getSubmissionLimit(): ?int
+    {
+        return $this->submissionLimit;
+    }
+
+    public function setSubmissionLimitMessage(?string $message): self
+    {
+        $this->isChanged('submissionLimitMessage', $message);
+        $this->submissionLimitMessage = $message;
+
+        return $this;
+    }
+
+    public function getSubmissionLimitMessage(): ?string
+    {
+        return $this->submissionLimitMessage;
+    }
+
+    public function getSubmissionCount(): int
+    {
+        return $this->submissionCount;
+    }
+
+    public function setSubmissionCount(int $count): self
+    {
+        $this->submissionCount = $count;
+
+        return $this;
+    }
+
+    public function isSubmissionLimitReached(): bool
+    {
+        return null !== $this->submissionLimit && $this->submissionLimit > 0 && $this->submissionCount >= $this->submissionLimit;
+    }
+}

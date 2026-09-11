@@ -1,0 +1,285 @@
+<?php
+
+namespace Mautic\ChannelBundle\Controller;
+
+use Mautic\ChannelBundle\Entity\Channel;
+use Mautic\ChannelBundle\Helper\MessageSearchScopeProvider;
+use Mautic\ChannelBundle\Model\MessageModel;
+use Mautic\CoreBundle\Controller\AbstractStandardFormController;
+use Mautic\CoreBundle\Factory\PageHelperFactoryInterface;
+use Mautic\CoreBundle\Helper\Chart\LineChart;
+use Mautic\LeadBundle\Controller\EntityContactsTrait;
+use Symfony\Component\Form\FormInterface;
+use Symfony\Component\Form\FormView;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Contracts\Service\Attribute\Required;
+
+final class MessageController extends AbstractStandardFormController
+{
+    use EntityContactsTrait;
+
+    /**
+     * @var list<array{command: string, label: string, suffix?: string, default?: bool, translate?: bool}>|null
+     */
+    private ?array $indexSearchScopes = null;
+
+    private RequestStack $requestStack;
+
+    private MessageModel $messageModel;
+
+    #[Required]
+    public function autowireMessageController(
+        RequestStack $requestStack,
+        MessageModel $messageModel,
+    ): void {
+        $this->requestStack = $requestStack;
+        $this->messageModel = $messageModel;
+    }
+
+    public function batchDeleteAction(Request $request): Response
+    {
+        return $this->batchDeleteStandard($request);
+    }
+
+    public function cloneAction(Request $request, $objectId): Response
+    {
+        return $this->cloneStandard($request, $objectId);
+    }
+
+    /**
+     * @param bool $ignorePost
+     */
+    public function editAction(Request $request, $objectId, $ignorePost = false): Response
+    {
+        return $this->editStandard($request, $objectId, $ignorePost);
+    }
+
+    /**
+     * @param int $page
+     */
+    public function indexAction(Request $request, MessageSearchScopeProvider $messageSearchScopeProvider, $page = 1): Response
+    {
+        $this->indexSearchScopes = $messageSearchScopeProvider->getScopes();
+
+        return $this->indexStandard($request, $page);
+    }
+
+    public function newAction(Request $request): Response
+    {
+        return $this->newStandard($request);
+    }
+
+    public function viewAction(Request $request, $objectId): Response
+    {
+        return $this->viewStandard($request, $objectId, 'message', 'channel');
+    }
+
+    /**
+     * @return mixed[]
+     */
+    protected function getViewArguments(array $args, $action): array
+    {
+        $viewParameters = [];
+        switch ($action) {
+            case 'index':
+                $viewParameters = [
+                    'headerTitle' => $this->translator->trans('mautic.channel.messages'),
+                    'listHeaders' => [
+                        [
+                            'text'  => 'mautic.core.channels',
+                            'class' => 'visible-md visible-lg',
+                        ],
+                    ],
+                    'listItemTemplate'  => '@MauticChannel/Message/list_item.html.twig',
+                    'enableCloneButton' => true,
+                ];
+
+                if (null !== $this->indexSearchScopes) {
+                    $viewParameters['searchScopes'] = $this->indexSearchScopes;
+                    $this->indexSearchScopes        = null;
+                }
+
+                break;
+            case 'view':
+                $message = $args['viewParameters']['item'];
+
+                // Init the date range filter form
+                $returnUrl = $this->generateUrl(
+                    'mautic_message_action',
+                    [
+                        'objectAction' => 'view',
+                        'objectId'     => $message->getId(),
+                    ]
+                );
+
+                [$dateFrom, $dateTo]     = $this->getViewDateRange($this->requestStack->getCurrentRequest(), $message->getId(), $returnUrl, 'local', $dateRangeForm);
+                $chart                   = new LineChart(null, $dateFrom, $dateTo);
+
+                /** @var Channel[] $channels */
+                $channels        = $this->messageModel->getChannels();
+                $messageChannels = $message->getChannels();
+                $chart->setDataset(
+                    $this->translator->trans('mautic.core.all'),
+                    $this->messageModel->getLeadStatsPost($message->getId(), $dateFrom, $dateTo)
+                );
+
+                $messagedLeads = [
+                    'all' => $this->forward(
+                        'Mautic\ChannelBundle\Controller\MessageController::contactsAction',
+                        [
+                            'objectId'   => $message->getId(),
+                            'page'       => $this->requestStack->getCurrentRequest()->getSession()->get('mautic.'.$this->getSessionBase('all').'.contact.page', 1),
+                            'ignoreAjax' => true,
+                            'channel'    => 'all',
+                        ]
+                    )->getContent(),
+                ];
+
+                foreach ($messageChannels as $channel) {
+                    if ($channel->isEnabled() && isset($channels[$channel->getChannel()])) {
+                        $chart->setDataset(
+                            $channels[$channel->getChannel()]['label'],
+                            $this->messageModel->getLeadStatsPost($message->getId(), $dateFrom, $dateTo, $channel->getChannel())
+                        );
+
+                        $messagedLeads[$channel->getChannel()] = $this->forward(
+                            'Mautic\ChannelBundle\Controller\MessageController::contactsAction',
+                            [
+                                'objectId' => $message->getId(),
+                                'page'     => $this->requestStack->getCurrentRequest()->getSession()->get(
+                                    'mautic.'.$this->getSessionBase($channel->getChannel()).'.contact.page',
+                                    1
+                                ),
+                                'ignoreAjax' => true,
+                                'channel'    => $channel->getChannel(),
+                            ]
+                        )->getContent();
+                    }
+                }
+
+                $viewParameters = [
+                    'channels'        => $channels,
+                    'channelContents' => $this->messageModel->getMessageChannels($message->getId()),
+                    'dateRangeForm'   => $dateRangeForm->createView(),
+                    'eventCounts'     => $chart->render(),
+                    'messagedLeads'   => $messagedLeads,
+                ];
+                break;
+            case 'new':
+            case 'edit':
+                $viewParameters = [
+                    'channels' => $this->messageModel->getChannels(),
+                ];
+
+                break;
+        }
+
+        $args['viewParameters'] = array_merge($args['viewParameters'], $viewParameters);
+
+        return $args;
+    }
+
+    public function deleteAction(Request $request, $objectId): Response
+    {
+        return $this->deleteStandard($request, $objectId);
+    }
+
+    protected function getTemplateBase(): string
+    {
+        return '@MauticChannel/Message';
+    }
+
+    protected function getFormView(FormInterface $form, $view): FormView
+    {
+        return $form->createView();
+    }
+
+    protected function getJsLoadMethodPrefix(): string
+    {
+        return 'messages';
+    }
+
+    protected function getModelName(): string
+    {
+        return 'channel.message';
+    }
+
+    protected function getRouteBase(): string
+    {
+        return 'message';
+    }
+
+    protected function getSessionBase($objectId = null): string
+    {
+        return 'message'.(($objectId) ? '.'.$objectId : '');
+    }
+
+    protected function getTranslationBase(): string
+    {
+        return 'mautic.channel.message';
+    }
+
+    /**
+     * @param int $page
+     */
+    public function contactsAction(
+        Request $request,
+        PageHelperFactoryInterface $pageHelperFactory,
+        $objectId,
+        $channel,
+        $page = 1,
+    ): Response {
+        $filter = [];
+        if ('all' !== $channel) {
+            $returnUrl = $this->generateUrl(
+                'mautic_message_action',
+                [
+                    'objectAction' => 'view',
+                    'objectId'     => $objectId,
+                ]
+            );
+            [$dateFrom, $dateTo] = $this->getViewDateRange($request, $objectId, $returnUrl, 'UTC');
+
+            $filter = [
+                'channel' => $channel,
+                [
+                    'col'  => 'entity.date_triggered',
+                    'expr' => 'between',
+                    'val'  => [
+                        $dateFrom->format('Y-m-d H:i:s'),
+                        $dateTo->format('Y-m-d H:i:s'),
+                    ],
+                ],
+            ];
+        }
+
+        return $this->generateContactsGrid(
+            $request,
+            $pageHelperFactory,
+            $objectId,
+            $page,
+            'channel:messages:view',
+            'message.'.$channel,
+            'campaign_lead_event_log',
+            $channel,
+            null,
+            $filter,
+            [
+                [
+                    'type'       => 'join',
+                    'from_alias' => 'entity',
+                    'table'      => 'campaign_events',
+                    'alias'      => 'event',
+                    'condition'  => "entity.event_id = event.id and event.channel = 'channel.message' and event.channel_id = ".(int) $objectId,
+                ],
+            ],
+            null,
+            [
+                'channel' => $channel ?: 'all',
+            ],
+            '.message-'.$channel
+        );
+    }
+}

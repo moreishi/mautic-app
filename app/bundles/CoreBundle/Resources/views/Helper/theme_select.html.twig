@@ -1,0 +1,136 @@
+{#
+  Variables
+    - type
+    - themes
+    - active
+#}
+{% set codeMode = 'mautic_code_mode' %}
+{% set isCodeMode = active == codeMode %}
+{% if themes %}
+  <div class="row">
+
+      {% for themeKey, themeInfo in themes %}
+          {% set isSelected = active is same as themeKey %}
+          {% if not isSelected or themeInfo.config.features is not defined or type in themeInfo.config.features %}
+            {% if (themeInfo.dir ~ '/thumbnail_' ~ type ~ '.png') is file %}
+                {% set thumbnailName, hasThumbnail = 'thumbnail_' ~ type ~ '.png', true %}
+            {% else %}
+                {% set thumbnailName = 'thumbnail.png' %}
+                {% set hasThumbnail = is_file(themeInfo.dir ~ '/' ~ thumbnailName) %}
+            {% endif %}
+            {% set thumbnailUrl = getAssetUrl(themeInfo.themesLocalDir ~ '/' ~ themeKey ~ '/' ~ thumbnailName) %}
+            <div class="col-md-3 theme-list {{ themeInfo.visibility.hidden|default(false) is empty ? '' : 'hide' }}">
+                <div class="panel panel-default {% if isSelected %}theme-selected{% endif %}">
+                    <div class="panel-body text-center">
+                        <h3>{{ themeInfo.name }}</h3>
+                        {% if hasThumbnail %}
+                            <a href="#" data-toggle="modal" data-target="#theme-{{ themeKey }}">
+                                <div style="background-image: url({{ thumbnailUrl }});background-repeat:no-repeat;background-size:contain; background-position:center; width: 100%; height: 250px"></div>
+                            </a>
+                        {% else %}
+                            <div class="panel-body text-center" style="height: 250px">
+                                <i class="ri-file-image-line ri-5x text-secondary" aria-hidden="true" style="padding-top: 75px; color: #E4E4E4;"></i>
+                            </div>
+                        {% endif %}
+                        {% include '@MauticCore/Helper/button.html.twig' with {
+                            buttons: [
+                                {
+                                    href: '#',
+                                    label: 'mautic.core.select',
+                                    variant: 'tertiary',
+                                    attributes: {
+                                        'type': 'button',
+                                        'data-theme': themeKey,
+                                        'class': 'btn-wide mt-md select-theme-link' ~ (isSelected ? ' hide' : ''),
+                                        'onclick': "mQuery('#dynamic-content-tab').addClass('hidden')"
+                                    },
+                                },
+                                {
+                                    label: 'mautic.core.form.filters.selected',
+                                    variant: 'tertiary',
+                                    attributes: {
+                                        'type': 'button',
+                                        'class': 'btn-wide mt-md select-theme-selected' ~ (not isSelected ? ' hide' : ''),
+                                        'disabled': ''
+                                    },
+                                }
+                            ]
+                        } %}
+                        {% if themeInfo.config.tags is defined and themeInfo.config.tags|length %}
+                            {% set tags = [] %}
+                            {% for tag in themeInfo.config.tags %}
+                                {% set tagObj = {
+                                    'label': 'mautic.core.theme.tag.' ~ tag|replace({'-': '_'}),
+                                    'size': 'sm'
+                                } %}
+                                {% if tag == 'adaptative' %}
+                                    {% set tagObj = tagObj|merge({
+                                        'color': 'brand',
+                                        'icon_only': true,
+                                        'icon': 'ri-pantone-fill'
+                                    }) %}
+                                {% endif %}
+                                {% set tags = tags|merge([tagObj]) %}
+                            {% endfor %}
+                            <div class="mt-md">
+                                {% include '@MauticCore/Helper/_tag.html.twig' with { tags: tags } %}
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% if hasThumbnail %}
+                    <!-- Modal -->
+                    <div class="modal fade" id="theme-{{ themeKey }}" tabindex="-1" role="dialog" aria-labelledby="{{ themeKey }}">
+                        <div class="modal-dialog" role="document">
+                            <div class="modal-content">
+                                <div class="modal-header">
+                                    <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                                    <h4 class="modal-title" id="{{ themeKey }}">{{ themeInfo.name }}</h4>
+                                </div>
+                                <div class="modal-body">
+                                    <div style="background-image: url({{ thumbnailUrl }});background-repeat:no-repeat;background-size:contain; background-position:center; width: 100%; height: 600px"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                {% endif %}
+            </div>
+          {% endif %}
+      {% endfor %}
+    <div class="col-md-3 theme-list">
+        <div class="panel panel-default {% if isCodeMode %}theme-selected{% endif %}">
+            <div class="panel-body text-center">
+                <h3>{{ 'mautic.core.code.mode'|trans }}</h3>
+                <div class="panel-body text-center" style="height: 250px">
+                    <i class="ri-code-s-slash-line ri-5x text-secondary" aria-hidden="true" style="padding-top: 75px; color: #E4E4E4;"></i>
+                </div>
+                {% include '@MauticCore/Helper/button.html.twig' with {
+                  buttons: [
+                      {
+                          href: '#',
+                          label: 'mautic.core.select',
+                          variant: 'tertiary',
+                          attributes: {
+                              'type': 'button',
+                              'data-theme': codeMode,
+                              'class': 'btn-wide mt-md select-theme-link' ~ (isCodeMode ? ' hide' : ''),
+                              'onclick': "mQuery('#dynamic-content-tab').removeClass('hidden')"
+                          },
+                      },
+                      {
+                          label: 'mautic.core.form.filters.selected',
+                          variant: 'tertiary',
+                          attributes: {
+                              'type': 'button',
+                              'class': 'btn-wide mt-md select-theme-selected' ~ (not isCodeMode ? ' hide' : ''),
+                              'disabled': 'disabled'
+                          },
+                      }
+                  ]
+              } %}
+            </div>
+        </div>
+    </div>
+    <div class="clearfix"></div>
+  </div>
+{% endif %}

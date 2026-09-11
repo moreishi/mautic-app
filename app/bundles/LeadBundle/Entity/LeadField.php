@@ -1,0 +1,859 @@
+<?php
+
+namespace Mautic\LeadBundle\Entity;
+
+use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\Delete;
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\Patch;
+use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Put;
+use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Mapping as ORM;
+use Mautic\ApiBundle\Serializer\Driver\ApiMetadataDriver;
+use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
+use Mautic\CoreBundle\Entity\CacheInvalidateInterface;
+use Mautic\CoreBundle\Entity\FormEntity;
+use Mautic\CoreBundle\Entity\UuidInterface;
+use Mautic\CoreBundle\Entity\UuidTrait;
+use Mautic\LeadBundle\Field\DTO\CustomFieldObject;
+use Mautic\LeadBundle\Form\Validator\Constraints\FieldAliasKeyword;
+use Mautic\LeadBundle\Validator\LeadFieldMinimumLength;
+use Symfony\Bridge\Doctrine\Validator\Constraints\UniqueEntity;
+use Symfony\Component\Serializer\Attribute\Groups;
+use Symfony\Component\Validator\Constraints as Assert;
+use Symfony\Component\Validator\Context\ExecutionContextInterface;
+use Symfony\Component\Validator\Mapping\ClassMetadata;
+
+#[ApiResource(
+    operations: [
+        new GetCollection(security: "is_granted('lead:leads:viewown')"),
+        new Post(security: "is_granted('lead:leads:create')"),
+        new Get(security: "is_granted('lead:leads:viewown', object)"),
+        new Put(security: "is_granted('lead:leads:editown', object)"),
+        new Patch(security: "is_granted('lead:leads:editother', object)"),
+        new Delete(security: "is_granted('lead:leads:deleteown', object)"),
+    ],
+    normalizationContext: [
+        'groups'                  => ['leadfield:read'],
+        'swagger_definition_name' => 'Read',
+    ],
+    denormalizationContext: [
+        'groups'                  => ['leadfield:write'],
+        'swagger_definition_name' => 'Write',
+    ]
+)]
+class LeadField extends FormEntity implements CacheInvalidateInterface, UuidInterface
+{
+    use UuidTrait;
+
+    public const MAX_VARCHAR_LENGTH      = 191;
+
+    public const CACHE_NAMESPACE         = 'LeadField';
+
+    public const TYPES_SUPPORTING_LENGTH = [
+        'text',
+        'select',
+        'phone',
+        'url',
+        'email',
+    ];
+
+    public const ENTITY_NAME        = 'lead_field';
+
+    /**
+     * @var int
+     */
+    #[Groups(['leadfield:read'])]
+    private $id;
+
+    private bool $isCloned = false;
+
+    /**
+     * @var string
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $label;
+
+    /**
+     * @var string
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $alias;
+
+    /**
+     * @var string
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $type = 'text';
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $group = 'core';
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $defaultValue;
+
+    /**
+     * @var bool
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $isRequired = false;
+
+    /**
+     * @var bool
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $isFixed = false;
+
+    /**
+     * @var bool
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $isVisible = true;
+
+    /**
+     * @var bool
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $isShortVisible = false;
+
+    /**
+     * @var bool
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $isListable = true;
+
+    /**
+     * @var bool
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $isPubliclyUpdatable = false;
+
+    /**
+     * @var bool|null
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $isUniqueIdentifer = false;
+
+    /**
+     * Workaround for incorrectly spelled $isUniqueIdentifer.
+     *
+     * @var bool
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $isUniqueIdentifier = false;
+
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private ?int $charLengthLimit = 64;
+
+    /**
+     * @var int|null
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $order = 1;
+
+    /**
+     * @var string|null
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $object = 'lead';
+
+    /**
+     * @var array
+     */
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private $properties = [];
+
+    #[Groups(['leadfield:read', 'leadfield:write'])]
+    private bool $isIndex = false;
+
+    /**
+     * The column in lead_fields table was not created yet if this property is true.
+     * Entity cannot be published and we cannot work with it until column is created.
+     */
+    #[Groups(['leadfield:read'])]
+    private bool $columnIsNotCreated = false;
+
+    /**
+     * The column in lead_fields table was not removed yet if this property is true.
+     */
+    #[Groups(['leadfield:read'])]
+    private bool $columnIsNotRemoved = false;
+
+    /**
+     * This property contains an original value for $isPublished.
+     * $isPublished is always set on false if $columnIsNotCreated is true.
+     */
+    #[Groups(['leadfield:read'])]
+    private bool $originalIsPublishedValue = false;
+
+    /**
+     * @var CustomFieldObject
+     */
+    private $customFieldObject;
+
+    public function __clone()
+    {
+        $this->id         = null;
+        $this->isCloned   = true;
+        $this->order      =  0;
+        $this->isFixed    = false;
+
+        parent::__clone();
+    }
+
+    public static function loadMetadata(ORM\ClassMetadata $metadata): void
+    {
+        $builder = new ClassMetadataBuilder($metadata);
+        $builder->addLifecycleEvent('identifierWorkaround', 'postLoad');
+
+        $builder->setTable('lead_fields')
+            ->setCustomRepositoryClass(LeadFieldRepository::class)
+            ->addIndex(['object', 'field_order', 'is_published'], 'idx_object_field_order_is_published');
+
+        $builder->addId();
+
+        $builder->addField('label', 'string');
+
+        $builder->addField('alias', 'string');
+
+        $builder->createField('type', 'string')
+            ->length(50)
+            ->build();
+
+        $builder->createField('group', 'string')
+            ->columnName('field_group')
+            ->nullable()
+            ->build();
+
+        $builder->createField('defaultValue', 'string')
+            ->columnName('default_value')
+            ->nullable()
+            ->build();
+
+        $builder->createField('isRequired', 'boolean')
+            ->columnName('is_required')
+            ->build();
+
+        $builder->createField('isFixed', 'boolean')
+            ->columnName('is_fixed')
+            ->build();
+
+        $builder->createField('isVisible', 'boolean')
+            ->columnName('is_visible')
+            ->build();
+
+        $builder->createField('isShortVisible', 'boolean')
+            ->columnName('is_short_visible')
+            ->nullable(false)
+            ->option('default', false)
+            ->build();
+
+        $builder->createField('isListable', 'boolean')
+            ->columnName('is_listable')
+            ->build();
+
+        $builder->createField('isPubliclyUpdatable', 'boolean')
+            ->columnName('is_publicly_updatable')
+            ->build();
+
+        $builder->addNullableField('isUniqueIdentifer', 'boolean', 'is_unique_identifer');
+
+        $builder->createField('isIndex', 'boolean')
+            ->columnName('is_index')
+            ->option('default', false)
+            ->nullable(false)
+            ->build();
+
+        $builder->createField('charLengthLimit', 'integer')
+            ->columnName('char_length_limit')
+            ->nullable()
+            ->build();
+
+        $builder->createField('order', 'integer')
+            ->columnName('field_order')
+            ->nullable()
+            ->build();
+
+        $builder->createField('object', 'string')
+            ->nullable()
+            ->build();
+
+        $builder->createField('properties', 'array')
+            ->nullable()
+            ->build();
+
+        $builder->createField('columnIsNotCreated', 'boolean')
+            ->columnName('column_is_not_created')
+            ->option('default', false)
+            ->build();
+
+        $builder->createField('columnIsNotRemoved', Types::BOOLEAN)
+            ->columnName('column_is_not_removed')
+            ->option('default', false)
+            ->build();
+
+        $builder->createField('originalIsPublishedValue', 'boolean')
+            ->columnName('original_is_published_value')
+            ->option('default', false)
+            ->build();
+
+        static::addUuidField($builder);
+    }
+
+    public static function loadValidatorMetadata(ClassMetadata $metadata): void
+    {
+        $metadata->addPropertyConstraint('label', new Assert\NotBlank(
+            message: 'mautic.lead.field.label.notblank'
+        ));
+
+        $metadata->addPropertyConstraint('label', new Assert\Length(max: 191, maxMessage: 'mautic.lead.field.label.maxlength'));
+
+        $metadata->addConstraint(new UniqueEntity(fields: ['alias'], message: 'mautic.lead.field.alias.unique'));
+
+        $metadata->addConstraint(new Assert\Callback(
+            function (LeadField $field, ExecutionContextInterface $context): void {
+                $violations = $context->getValidator()->validate($field, [new FieldAliasKeyword()]);
+
+                if ($violations->count() > 0) {
+                    $context->buildViolation($violations->get(0)->getMessage())
+                        ->atPath('alias')
+                        ->addViolation();
+                }
+            },
+        ));
+
+        $metadata->addConstraint(new LeadFieldMinimumLength());
+    }
+
+    /**
+     * Prepares the metadata for API usage.
+     */
+    public static function loadApiMetadata(ApiMetadataDriver $metadata): void
+    {
+        $metadata->setGroupPrefix('leadField')
+            ->addListProperties(
+                [
+                    'id',
+                    'label',
+                    'alias',
+                    'type',
+                    'group',
+                    'order',
+                    'object',
+                ]
+            )
+            ->addProperties(
+                [
+                    'defaultValue',
+                    'isRequired',
+                    'isFixed',
+                    'isListable',
+                    'isVisible',
+                    'isVisible',
+                    'isShortVisible',
+                    'isUniqueIdentifier',
+                    'isPubliclyUpdatable',
+                    'properties',
+                    'isIndex',
+                    'charLengthLimit',
+                ]
+            )
+            ->build();
+    }
+
+    public function setId(?int $id = null): void
+    {
+        $this->id = $id;
+    }
+
+    /**
+     * @return int
+     */
+    public function getId()
+    {
+        return $this->id;
+    }
+
+    public function getIsCloned(): bool
+    {
+        return $this->isCloned;
+    }
+
+    /**
+     * @param string $label
+     */
+    public function setLabel($label): static
+    {
+        $this->isChanged('label', $label);
+        $this->label = $label;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getLabel()
+    {
+        return $this->label;
+    }
+
+    /**
+     * Proxy function to setLabel().
+     *
+     * @param string $label
+     */
+    public function setName($label): static
+    {
+        $this->isChanged('label', $label);
+
+        return $this->setLabel($label);
+    }
+
+    /**
+     * Proxy function for getLabel().
+     *
+     * @return string
+     */
+    public function getName()
+    {
+        return $this->label;
+    }
+
+    /**
+     * @param string $type
+     */
+    public function setType($type): static
+    {
+        $this->isChanged('type', $type);
+        $this->type = $type;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getType()
+    {
+        return $this->type;
+    }
+
+    /**
+     * @param string|array<string> $defaultValue
+     */
+    public function setDefaultValue($defaultValue): static
+    {
+        $defaultValue = is_array($defaultValue) ? implode('|', $defaultValue) : $defaultValue;
+        $this->isChanged('defaultValue', $defaultValue);
+        $this->defaultValue = $defaultValue;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getDefaultValue()
+    {
+        return $this->defaultValue;
+    }
+
+    /**
+     * @param bool $isRequired
+     */
+    public function setIsRequired($isRequired): static
+    {
+        $this->isChanged('isRequired', $isRequired);
+        $this->isRequired = $isRequired;
+
+        return $this;
+    }
+
+    /**
+     * @return bool
+     */
+    public function getIsRequired()
+    {
+        return $this->isRequired;
+    }
+
+    /**
+     * Proxy to getIsRequired().
+     *
+     * @return bool
+     */
+    public function isRequired()
+    {
+        return $this->isRequired;
+    }
+
+    /**
+     * @param bool $isFixed
+     */
+    public function setIsFixed($isFixed): static
+    {
+        $this->isFixed = $isFixed;
+
+        return $this;
+    }
+
+    /**
+     * @return bool
+     */
+    public function getIsFixed()
+    {
+        return $this->isFixed;
+    }
+
+    /**
+     * Proxy to getIsFixed().
+     *
+     * @return bool
+     */
+    public function isFixed()
+    {
+        return $this->isFixed;
+    }
+
+    /**
+     * @param mixed[] $properties
+     */
+    public function setProperties($properties): static
+    {
+        $this->isChanged('properties', $properties);
+        $this->properties = $properties;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed[]
+     */
+    public function getProperties()
+    {
+        return $this->properties;
+    }
+
+    /**
+     * @param int $order
+     */
+    public function setOrder($order): static
+    {
+        $this->isChanged('order', $order);
+        $this->order = $order;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getObject()
+    {
+        return $this->object;
+    }
+
+    public function setCharLengthLimit(?int $charLengthLimit): self
+    {
+        $this->isChanged('charLengthLimit', $charLengthLimit);
+        $this->charLengthLimit = $charLengthLimit;
+
+        return $this;
+    }
+
+    public function getCharLengthLimit(): ?int
+    {
+        return $this->charLengthLimit;
+    }
+
+    public function getCustomFieldObject(): string
+    {
+        if (!$this->customFieldObject) {
+            $this->customFieldObject = new CustomFieldObject($this);
+        }
+
+        return $this->customFieldObject->getObject();
+    }
+
+    /**
+     * @param string $object
+     */
+    public function setObject($object): static
+    {
+        $this->isChanged('object', $object);
+        $this->object = $object;
+
+        return $this;
+    }
+
+    /**
+     * @return int|null
+     */
+    public function getOrder()
+    {
+        return $this->order;
+    }
+
+    /**
+     * @param bool $isVisible
+     */
+    public function setIsVisible($isVisible): static
+    {
+        $this->isChanged('isVisible', $isVisible);
+        $this->isVisible = $isVisible;
+
+        return $this;
+    }
+
+    /**
+     * @return bool
+     */
+    public function getIsVisible()
+    {
+        return $this->isVisible;
+    }
+
+    /**
+     * Proxy to getIsVisible().
+     *
+     * @return bool
+     */
+    public function isVisible()
+    {
+        return $this->isVisible;
+    }
+
+    public function setIsShortVisible(?bool $isShortVisible): self
+    {
+        $isShortVisible ??= false;
+        $this->isChanged('isShortVisible', $isShortVisible);
+        $this->isShortVisible = $isShortVisible;
+
+        return $this;
+    }
+
+    /**
+     * @return bool
+     */
+    public function getIsShortVisible()
+    {
+        return $this->isShortVisible;
+    }
+
+    /**
+     * Proxy to getIsShortVisible().
+     *
+     * @return bool
+     */
+    public function isShortVisible()
+    {
+        return $this->isShortVisible;
+    }
+
+    /**
+     * Get the unique identifer state of the field.
+     *
+     * @return bool|null
+     */
+    public function getIsUniqueIdentifer()
+    {
+        return $this->isUniqueIdentifer;
+    }
+
+    /**
+     * Set the unique identifer state of the field.
+     *
+     * @param mixed $isUniqueIdentifer
+     */
+    public function setIsUniqueIdentifer($isUniqueIdentifer): static
+    {
+        if ($isUniqueIdentifer) {
+            $this->isIndex = true;
+        }
+
+        $this->isUniqueIdentifer = $this->isUniqueIdentifier = $isUniqueIdentifer;
+
+        return $this;
+    }
+
+    /**
+     * Wrapper for incorrectly spelled setIsUniqueIdentifer.
+     *
+     * @return bool
+     */
+    public function getIsUniqueIdentifier()
+    {
+        return $this->isUniqueIdentifer;
+    }
+
+    /**
+     * Wrapper for incorrectly spelled setIsUniqueIdentifer.
+     *
+     * @param mixed $isUniqueIdentifier
+     */
+    public function setIsUniqueIdentifier($isUniqueIdentifier): static
+    {
+        return $this->setIsUniqueIdentifer($isUniqueIdentifier);
+    }
+
+    /**
+     * @param string $alias
+     */
+    public function setAlias($alias): static
+    {
+        $this->isChanged('alias', $alias);
+        $this->alias = $alias;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getAlias()
+    {
+        return $this->alias;
+    }
+
+    /**
+     * @param bool $isListable
+     */
+    public function setIsListable($isListable): static
+    {
+        $this->isChanged('isListable', $isListable);
+        $this->isListable = $isListable;
+
+        return $this;
+    }
+
+    /**
+     * @return bool
+     */
+    public function getIsListable()
+    {
+        return $this->isListable;
+    }
+
+    /**
+     * Proxy to getIsListable().
+     *
+     * @return bool
+     */
+    public function isListable()
+    {
+        return $this->isListable;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getGroup()
+    {
+        return $this->group;
+    }
+
+    /**
+     * @param mixed $group
+     */
+    public function setGroup($group): void
+    {
+        $this->group = $group;
+    }
+
+    /**
+     * @return bool
+     */
+    public function getIsPubliclyUpdatable()
+    {
+        return $this->isPubliclyUpdatable;
+    }
+
+    /**
+     * @param mixed $isPubliclyUpdatable
+     */
+    public function setIsPubliclyUpdatable($isPubliclyUpdatable): void
+    {
+        $this->isPubliclyUpdatable = (bool) $isPubliclyUpdatable;
+    }
+
+    /**
+     * Workaround for mispelled isUniqueIdentifer.
+     */
+    public function identifierWorkaround(): void
+    {
+        $this->isUniqueIdentifier = $this->isUniqueIdentifer;
+    }
+
+    public function isNew(): bool
+    {
+        return !(bool) $this->id;
+    }
+
+    public function getColumnIsNotCreated(): bool
+    {
+        return $this->columnIsNotCreated;
+    }
+
+    public function getColumnIsNotRemoved(): bool
+    {
+        return $this->columnIsNotRemoved;
+    }
+
+    public function setColumnIsNotCreated(): void
+    {
+        $this->columnIsNotCreated       = true;
+        $this->originalIsPublishedValue = $this->getIsPublished();
+        $this->setIsPublished(false);
+    }
+
+    public function setColumnIsNotRemoved(): void
+    {
+        $this->columnIsNotRemoved = true;
+        $this->setIsPublished(false);
+    }
+
+    public function setColumnWasCreated(): void
+    {
+        $this->columnIsNotCreated = false;
+        $this->setIsPublished($this->getOriginalIsPublishedValue());
+    }
+
+    public function disablePublishChange(): bool
+    {
+        return 'email' === $this->alias || $this->columnIsNotCreated || $this->columnIsNotRemoved;
+    }
+
+    public function getOriginalIsPublishedValue(): bool
+    {
+        return $this->originalIsPublishedValue;
+    }
+
+    public function getCacheNamespacesToDelete(): array
+    {
+        return [self::CACHE_NAMESPACE];
+    }
+
+    public function isIsIndex(): bool
+    {
+        return $this->isIndex;
+    }
+
+    public function setIsIndex(?bool $indexable): void
+    {
+        $this->isIndex = $indexable ?? false;
+    }
+
+    public function supportsLength(): bool
+    {
+        return in_array($this->type, self::TYPES_SUPPORTING_LENGTH);
+    }
+}

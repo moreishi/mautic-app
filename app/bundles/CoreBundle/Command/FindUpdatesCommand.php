@@ -1,0 +1,48 @@
+<?php
+
+namespace Mautic\CoreBundle\Command;
+
+use Mautic\CoreBundle\Helper\UpdateHelper;
+use Symfony\Component\Console\Attribute\AsCommand;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Contracts\Translation\TranslatorInterface;
+
+/**
+ * CLI Command to fetch application updates.
+ */
+#[AsCommand(
+    name: 'mautic:update:find',
+    description: 'Fetches updates for Mautic',
+    help: <<<'TXT'
+The <info>%command.name%</info> command checks for updates for the Mautic application.
+
+<info>php %command.full_name%</info>
+TXT
+)]
+final class FindUpdatesCommand extends Command
+{
+    public function __construct(
+        private readonly TranslatorInterface $translator,
+        private readonly UpdateHelper $updateHelper,
+    ) {
+        parent::__construct();
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $updateData = $this->updateHelper->fetchData(true);
+
+        if ($updateData['error']) {
+            $output->writeln('<error>'.$this->translator->trans($updateData['message']).'</error>');
+        } elseif ('mautic.core.updater.running.latest.version' == $updateData['message']) {
+            $output->writeln('<info>'.$this->translator->trans($updateData['message']).'</info>');
+        } else {
+            $output->writeln($this->translator->trans($updateData['message'], ['%version%' => $updateData['version'], '%announcement%' => $updateData['announcement']]));
+            $output->writeln($this->translator->trans('mautic.core.updater.cli.update'));
+        }
+
+        return Command::SUCCESS;
+    }
+}

@@ -1,0 +1,67 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\SmsBundle\Event;
+
+use Mautic\CoreBundle\Event\CommonEvent;
+use Mautic\LeadBundle\Entity\Lead;
+
+class SmsSendEvent extends CommonEvent
+{
+    /**
+     * @var int
+     */
+    protected $smsId;
+
+    /**
+     * @param string $content
+     */
+    public function __construct(
+        protected $content,
+        protected Lead $lead,
+    ) {
+    }
+
+    /**
+     * @return string
+     */
+    public function getContent()
+    {
+        return $this->content;
+    }
+
+    /**
+     * @param string $content
+     */
+    public function setContent($content): void
+    {
+        $this->content = $content;
+    }
+
+    public function getLead(): Lead
+    {
+        return $this->lead;
+    }
+
+    public function setLead(Lead $lead): void
+    {
+        $this->lead = $lead;
+    }
+
+    /**
+     * @return int
+     */
+    public function getSmsId()
+    {
+        return $this->smsId;
+    }
+
+    /**
+     * @param int $smsId
+     */
+    public function setSmsId($smsId): void
+    {
+        $this->smsId = $smsId;
+    }
+}

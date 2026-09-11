@@ -1,0 +1,47 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\ChannelBundle\Event;
+
+use Mautic\ChannelBundle\Entity\MessageQueue;
+use Symfony\Contracts\EventDispatcher\Event;
+
+final class MessageQueueBatchProcessEvent extends Event
+{
+    /**
+     * @param MessageQueue[] $messages
+     */
+    public function __construct(
+        private readonly array $messages,
+        private $channel,
+        private $channelId,
+    ) {
+    }
+
+    public function checkContext($channel): bool
+    {
+        return $channel === $this->channel;
+    }
+
+    public function getMessages(): array
+    {
+        return $this->messages;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getChannel()
+    {
+        return $this->channel;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getChannelId()
+    {
+        return $this->channelId;
+    }
+}

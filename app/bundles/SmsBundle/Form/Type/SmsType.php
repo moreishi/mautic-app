@@ -1,0 +1,248 @@
+<?php
+
+namespace Mautic\SmsBundle\Form\Type;
+
+use Doctrine\ORM\EntityManagerInterface;
+use Mautic\CategoryBundle\Form\Type\CategoryListType;
+use Mautic\CoreBundle\Form\DataTransformer\IdToEntityModelTransformer;
+use Mautic\CoreBundle\Form\EventListener\CleanFormSubscriber;
+use Mautic\CoreBundle\Form\EventListener\FormExitSubscriber;
+use Mautic\CoreBundle\Form\Type\FormButtonsType;
+use Mautic\CoreBundle\Form\Type\PublishDownDateType;
+use Mautic\CoreBundle\Form\Type\PublishUpDateType;
+use Mautic\CoreBundle\Form\Type\YesNoButtonGroupType;
+use Mautic\LeadBundle\Entity\LeadList;
+use Mautic\LeadBundle\Form\Type\LeadListType;
+use Mautic\ProjectBundle\Form\Type\ProjectType;
+use Mautic\SmsBundle\Entity\Sms;
+use Symfony\Component\Form\AbstractType;
+use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+use Symfony\Component\Form\Extension\Core\Type\HiddenType;
+use Symfony\Component\Form\Extension\Core\Type\LocaleType;
+use Symfony\Component\Form\Extension\Core\Type\TextareaType;
+use Symfony\Component\Form\Extension\Core\Type\TextType;
+use Symfony\Component\Form\FormBuilderInterface;
+use Symfony\Component\Form\FormEvent;
+use Symfony\Component\Form\FormEvents;
+use Symfony\Component\OptionsResolver\OptionsResolver;
+
+/**
+ * @extends AbstractType<Sms>
+ */
+final class SmsType extends AbstractType
+{
+    public function __construct(
+        private readonly EntityManagerInterface $em,
+    ) {
+    }
+
+    public function buildForm(FormBuilderInterface $builder, array $options): void
+    {
+        $builder->addEventSubscriber(new CleanFormSubscriber(['content' => 'html', 'customHtml' => 'html']));
+        $builder->addEventSubscriber(new FormExitSubscriber('sms.sms', $options));
+
+        $builder->add(
+            'name',
+            TextType::class,
+            [
+                'label'      => 'mautic.sms.form.internal.name',
+                'label_attr' => ['class' => 'control-label'],
+                'attr'       => ['class' => 'form-control'],
+            ]
+        );
+
+        $builder->add(
+            'description',
+            TextareaType::class,
+            [
+                'label'      => 'mautic.sms.form.internal.description',
+                'label_attr' => ['class' => 'control-label'],
+                'attr'       => ['class' => 'form-control'],
+                'required'   => false,
+            ]
+        );
+
+        $builder->add(
+            'message',
+            TextareaType::class,
+            [
+                'label'      => 'mautic.sms.form.message',
+                'label_attr' => ['class' => 'control-label'],
+                'attr'       => [
+                    'class'                => 'form-control',
+                    'data-token-activator' => '{',
+                    'data-token-visual'    => 'false',
+                    'rows'                 => 6,
+                ],
+            ]
+        );
+
+        $builder->add('isPublished', YesNoButtonGroupType::class, [
+            'label' => 'mautic.core.form.available',
+        ]);
+
+        $builder->add(
+            'isMms',
+            YesNoButtonGroupType::class,
+            [
+                'label' => 'mautic.sms.form.is_mms',
+                'data'  => (bool) $options['data']->getIsMms(),
+                'attr'  => [
+                    'onchange' => 'Mautic.toggleIsMms()',
+                ],
+            ]
+        );
+
+        $mediaFields = function (FormEvent $event): void {
+            $form        = $event->getForm();
+            $data        = $event->getData();
+            $mediaChoice = $data instanceof Sms ? $data->getMedia() : ($data['media'] ?? []);
+            if ($form->has('media')) {
+                $form->remove('media');
+            }
+            $form->add(
+                'media',
+                ChoiceType::class,
+                [
+                    'label'             => 'mautic.sms.form.media',
+                    'choices'           => array_combine($mediaChoice, $mediaChoice),
+                    'expanded'          => true,
+                    'multiple'          => true,
+                    'required'          => false,
+                ]
+            );
+        };
+
+        $builder->addEventListener(FormEvents::PRE_SET_DATA, $mediaFields);
+        $builder->addEventListener(FormEvents::PRE_SUBMIT, $mediaFields);
+
+        $builder->add('isPublished', YesNoButtonGroupType::class);
+
+        // add lead lists
+        $transformer = new IdToEntityModelTransformer($this->em, LeadList::class, 'id', true);
+        $builder->add(
+            $builder->create(
+                'lists',
+                LeadListType::class,
+                [
+                    'label'      => 'mautic.email.form.list',
+                    'label_attr' => ['class' => 'control-label'],
+                    'attr'       => [
+                        'class'        => 'form-control',
+                    ],
+                    'multiple' => true,
+                    'expanded' => false,
+                    'required' => true,
+                ]
+            )
+                ->addModelTransformer($transformer)
+        );
+
+        $builder->add('publishUp', PublishUpDateType::class);
+        $builder->add('publishDown', PublishDownDateType::class);
+
+        // add category
+        $builder->add(
+            'category',
+            CategoryListType::class,
+            [
+                'bundle' => 'sms',
+            ]
+        );
+
+        $builder->add('projects', ProjectType::class);
+
+        $builder->add(
+            'language',
+            LocaleType::class,
+            [
+                'label'      => 'mautic.core.language',
+                'label_attr' => ['class' => 'control-label'],
+                'attr'       => [
+                    'class' => 'form-control',
+                ],
+                'required' => false,
+            ]
+        );
+
+        $transformer = new IdToEntityModelTransformer($this->em, Sms::class);
+        $builder->add(
+            $builder->create(
+                'translationParent',
+                HiddenType::class
+            )->addModelTransformer($transformer)
+        );
+
+        $builder->add(
+            'translationParentSelector', // This is a non-mapped field
+            SmsListType::class, // A new form type to be created
+            [
+                'label'      => 'mautic.core.form.translation_parent',
+                'label_attr' => ['class' => 'control-label'],
+                'attr'       => [
+                    'class'   => 'form-control',
+                    'tooltip' => 'mautic.core.form.translation_parent.help',
+                ],
+                'required'       => false,
+                'multiple'       => false,
+                'placeholder'    => 'mautic.core.form.translation_parent.empty',
+                'top_level'      => 'translation',
+                'ignore_ids'     => [(int) $options['data']->getId()],
+                'mapped'         => false,
+                'data'           => ($options['data']->getTranslationParent()) ? $options['data']->getTranslationParent()->getId() : null,
+            ]
+        );
+
+        $builder->addEventListener(
+            FormEvents::PRE_SUBMIT,
+            function (FormEvent $event): void {
+                $data = $event->getData();
+                if (isset($data['translationParentSelector'])) {
+                    $data['translationParent'] = $data['translationParentSelector'];
+                }
+                $event->setData($data);
+            }
+        );
+
+        $builder->add('smsType', HiddenType::class);
+        $builder->add('buttons', FormButtonsType::class);
+
+        if (!empty($options['update_select'])) {
+            $builder->add(
+                'buttons',
+                FormButtonsType::class,
+                [
+                    'apply_text' => false,
+                ]
+            );
+            $builder->add(
+                'updateSelect',
+                HiddenType::class,
+                [
+                    'data'   => $options['update_select'],
+                    'mapped' => false,
+                ]
+            );
+        } else {
+            $builder->add(
+                'buttons',
+                FormButtonsType::class
+            );
+        }
+
+        if (!empty($options['action'])) {
+            $builder->setAction($options['action']);
+        }
+    }
+
+    public function configureOptions(OptionsResolver $resolver): void
+    {
+        $resolver->setDefaults(
+            [
+                'data_class' => Sms::class,
+            ]
+        );
+
+        $resolver->setDefined(['update_select']);
+    }
+}

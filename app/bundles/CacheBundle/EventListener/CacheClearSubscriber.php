@@ -1,0 +1,43 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\CacheBundle\EventListener;
+
+use Mautic\CacheBundle\Cache\CacheProvider;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\Cache\Adapter\AdapterInterface;
+use Symfony\Component\HttpKernel\CacheClearer\CacheClearerInterface;
+
+final readonly class CacheClearSubscriber implements CacheClearerInterface
+{
+    /**
+     * @param CacheProvider $cacheProvider
+     */
+    public function __construct(
+        private AdapterInterface $cacheProvider,
+        private LoggerInterface $logger,
+    ) {
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function clear(string $cacheDir): void
+    {
+        try {
+            $reflect = new \ReflectionClass($this->cacheProvider->getCacheAdapter());
+            $adapter = $reflect->getShortName();
+        } catch (\ReflectionException) {
+            $adapter = 'unknown';
+        }
+
+        try {
+            if (!$this->cacheProvider->clear()) {
+                $this->logger->emergency('Failed to clear Mautic cache.', ['adapter' => $adapter]);
+                throw new \Exception('Failed to clear '.$adapter);
+            }
+        } catch (\PDOException) {
+        }
+    }
+}

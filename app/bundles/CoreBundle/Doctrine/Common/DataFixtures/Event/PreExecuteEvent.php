@@ -1,0 +1,33 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\CoreBundle\Doctrine\Common\DataFixtures\Event;
+
+use Doctrine\Common\DataFixtures\Purger\ORMPurger;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Contracts\EventDispatcher\Event;
+
+final class PreExecuteEvent extends Event
+{
+    public function __construct(
+        private readonly EntityManagerInterface $entityManager,
+        private readonly int $purgeMode,
+    ) {
+    }
+
+    public function getEntityManager(): EntityManagerInterface
+    {
+        return $this->entityManager;
+    }
+
+    public function isDelete(): bool
+    {
+        return ORMPurger::PURGE_MODE_DELETE === $this->purgeMode;
+    }
+
+    public function isTruncate(): bool
+    {
+        return ORMPurger::PURGE_MODE_TRUNCATE === $this->purgeMode;
+    }
+}

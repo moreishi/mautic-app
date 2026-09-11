@@ -1,0 +1,364 @@
+<?php
+
+namespace Mautic\LeadBundle\Entity;
+
+use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Mapping as ORM;
+use Mautic\ApiBundle\Serializer\Driver\ApiMetadataDriver;
+use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
+
+class UtmTag
+{
+    /**
+     * @var int
+     */
+    private $id;
+
+    /**
+     * @var \DateTimeInterface
+     */
+    private $dateAdded;
+
+    /**
+     * @var Lead
+     */
+    private $lead;
+
+    /**
+     * @var array
+     */
+    private $query = [];
+
+    /**
+     * @var string|null
+     */
+    private $referer;
+
+    /**
+     * @var string|null
+     */
+    private $remoteHost;
+
+    private $url;
+
+    /**
+     * @var string|null
+     */
+    private $userAgent;
+
+    /**
+     * @var string|null
+     */
+    private $utmCampaign;
+
+    /**
+     * @var string|null
+     */
+    private $utmContent;
+
+    /**
+     * @var string|null
+     */
+    private $utmMedium;
+
+    /**
+     * @var string|null
+     */
+    private $utmSource;
+
+    /**
+     * @var string|null
+     */
+    private $utmTerm;
+
+    public static function loadMetadata(ORM\ClassMetadata $metadata): void
+    {
+        $builder = new ClassMetadataBuilder($metadata);
+
+        $builder->setTable('lead_utmtags');
+        $builder->setCustomRepositoryClass(UtmTagRepository::class);
+        $builder->addId();
+        $builder->addDateAdded();
+        $builder->addLead(false, 'CASCADE', false, 'utmtags');
+        $builder->addNullableField('query', Types::ARRAY);
+        $builder->addNullableField('referer', Types::TEXT);
+        $builder->addNullableField('remoteHost', Types::STRING, 'remote_host');
+        $builder->addNullableField('url', Types::TEXT);
+        $builder->addNullableField('userAgent', Types::TEXT, 'user_agent');
+        $builder->addNullableField('utmCampaign', Types::STRING, 'utm_campaign');
+        $builder->addNullableField('utmContent', Types::STRING, 'utm_content');
+        $builder->addNullableField('utmMedium', Types::STRING, 'utm_medium');
+        $builder->addNullableField('utmSource', Types::STRING, 'utm_source');
+        $builder->addNullableField('utmTerm', Types::STRING, 'utm_term');
+        $builder->addIndex(['date_added'], 'utm_date_added');
+    }
+
+    /**
+     * Prepares the metadata for API usage.
+     */
+    public static function loadApiMetadata(ApiMetadataDriver $metadata): void
+    {
+        $metadata->setGroupPrefix('utmtags')
+            ->addListProperties(
+                [
+                    'id',
+                    'lead',
+                    'query',
+                    'referer',
+                    'remoteHost',
+                    'url',
+                    'userAgent',
+                    'utmCampaign',
+                    'utmContent',
+                    'utmMedium',
+                    'utmSource',
+                    'utmTerm',
+                ]
+            )
+            ->build();
+    }
+
+    /**
+     * @return int
+     */
+    public function getId()
+    {
+        return $this->id;
+    }
+
+    public function setDateAdded(\DateTimeInterface $date): static
+    {
+        $this->dateAdded = $date;
+
+        return $this;
+    }
+
+    /**
+     * @return \DateTimeInterface
+     */
+    public function getDateAdded()
+    {
+        return $this->dateAdded;
+    }
+
+    /**
+     * @return Lead
+     */
+    public function getLead()
+    {
+        return $this->lead;
+    }
+
+    public function setLead(Lead $lead): static
+    {
+        $this->lead = $lead;
+
+        return $this;
+    }
+
+    /**
+     * @return array
+     */
+    public function getQuery()
+    {
+        return $this->query;
+    }
+
+    /**
+     * @param array $query
+     */
+    public function setQuery($query): static
+    {
+        $this->query = $query;
+
+        return $this;
+    }
+
+    /**
+     * @param string $referer
+     */
+    public function setReferer($referer): static
+    {
+        $this->referer = $referer;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getReferer()
+    {
+        return $this->referer;
+    }
+
+    /**
+     * @param string $remoteHost
+     */
+    public function setRemoteHost($remoteHost): static
+    {
+        $this->remoteHost = $remoteHost;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getRemoteHost()
+    {
+        return $this->remoteHost;
+    }
+
+    /**
+     * @param string $url
+     */
+    public function setUrl($url): static
+    {
+        $this->url = $url;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getUrl()
+    {
+        return $this->url;
+    }
+
+    /**
+     * @param string $userAgent
+     */
+    public function setUserAgent($userAgent): static
+    {
+        $this->userAgent = $userAgent;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getUserAgent()
+    {
+        return $this->userAgent;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getUtmCampaign()
+    {
+        return $this->utmCampaign;
+    }
+
+    /**
+     * @param string $utmCampaign
+     */
+    public function setUtmCampaign($utmCampaign): static
+    {
+        $this->utmCampaign = $utmCampaign;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getUtmContent()
+    {
+        return $this->utmContent;
+    }
+
+    /**
+     * @param string $utmContent
+     */
+    public function setUtmContent($utmContent): static
+    {
+        $utmContent       = mb_strlen($utmContent) <= ClassMetadataBuilder::MAX_VARCHAR_INDEXED_LENGTH ? $utmContent : mb_substr($utmContent, 0, ClassMetadataBuilder::MAX_VARCHAR_INDEXED_LENGTH);
+        $this->utmContent = $utmContent;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getUtmMedium()
+    {
+        return $this->utmMedium;
+    }
+
+    /**
+     * @param string $utmMedium
+     */
+    public function setUtmMedium($utmMedium): static
+    {
+        $this->utmMedium = $utmMedium;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getUtmSource()
+    {
+        return $this->utmSource;
+    }
+
+    /**
+     * @param string $utmSource
+     */
+    public function setUtmSource($utmSource): static
+    {
+        $this->utmSource = $utmSource;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getUtmTerm()
+    {
+        return $this->utmTerm;
+    }
+
+    /**
+     * @param string $utmTerm
+     */
+    public function setUtmTerm($utmTerm): static
+    {
+        $this->utmTerm = $utmTerm;
+
+        return $this;
+    }
+
+    public function hasUtmTags(): bool
+    {
+        return !empty($this->utmCampaign) || !empty($this->utmSource) || !empty($this->utmMedium) || !empty($this->utmContent) || !empty($this->utmTerm);
+    }
+
+    /**
+     * Available fields and it's setters.
+     */
+    public function getFieldSetterList(): array
+    {
+        return [
+            'utm_campaign' => 'setUtmCampaign',
+            'utm_source'   => 'setUtmSource',
+            'utm_medium'   => 'setUtmMedium',
+            'utm_content'  => 'setUtmContent',
+            'utm_term'     => 'setUtmTerm',
+            'user_agent'   => 'setUserAgent',
+            'url'          => 'setUrl',
+            'referer'      => 'setReferer',
+            'query'        => 'setQuery',
+            'remote_host'  => 'setRemoteHost',
+            'date_added'   => 'setDateAdded',
+        ];
+    }
+}

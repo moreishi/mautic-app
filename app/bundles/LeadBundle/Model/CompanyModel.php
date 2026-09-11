@@ -1,0 +1,1054 @@
+<?php
+
+namespace Mautic\LeadBundle\Model;
+
+use Doctrine\DBAL\Query\Expression\ExpressionBuilder;
+use Doctrine\ORM\EntityManagerInterface;
+use Mautic\CoreBundle\Cache\ResultCacheOptions;
+use Mautic\CoreBundle\Form\RequestTrait;
+use Mautic\CoreBundle\Helper\CoreParametersHelper;
+use Mautic\CoreBundle\Helper\DateTimeHelper;
+use Mautic\CoreBundle\Helper\InputHelper;
+use Mautic\CoreBundle\Helper\UserHelper;
+use Mautic\CoreBundle\Model\AjaxLookupModelInterface;
+use Mautic\CoreBundle\Model\FormModel as CommonFormModel;
+use Mautic\CoreBundle\Security\Permissions\CorePermissions;
+use Mautic\CoreBundle\Translation\Translator;
+use Mautic\EmailBundle\Helper\EmailValidator;
+use Mautic\LeadBundle\Deduplicate\CompanyDeduper;
+use Mautic\LeadBundle\Entity\Company;
+use Mautic\LeadBundle\Entity\CompanyLead;
+use Mautic\LeadBundle\Entity\CompanyLeadRepository;
+use Mautic\LeadBundle\Entity\CompanyRepository;
+use Mautic\LeadBundle\Entity\Lead;
+use Mautic\LeadBundle\Entity\LeadField;
+use Mautic\LeadBundle\Entity\LeadRepository;
+use Mautic\LeadBundle\Event\CompanyEvent;
+use Mautic\LeadBundle\Event\CompanyMergeEvent;
+use Mautic\LeadBundle\Event\LeadChangeCompanyEvent;
+use Mautic\LeadBundle\Exception\UniqueFieldNotFoundException;
+use Mautic\LeadBundle\Field\FieldList;
+use Mautic\LeadBundle\Form\Type\CompanyType;
+use Mautic\LeadBundle\LeadEvents;
+use Mautic\UserBundle\Entity\User;
+use Mautic\UserBundle\Entity\UserRepository;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use Symfony\Component\Form\FormFactoryInterface;
+use Symfony\Component\Form\FormInterface;
+use Symfony\Component\HttpKernel\Exception\MethodNotAllowedHttpException;
+use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
+use Symfony\Contracts\EventDispatcher\Event;
+
+/**
+ * @extends CommonFormModel<Company>
+ *
+ * @implements AjaxLookupModelInterface<Company>
+ */
+class CompanyModel extends CommonFormModel implements AjaxLookupModelInterface
+{
+    use DefaultValueTrait;
+    use RequestTrait;
+
+    /**
+     * @var array
+     */
+    protected $companyFields;
+
+    /**
+     * @var array
+     */
+    private $fields = [];
+
+    private bool $repoSetup = false;
+
+    public function __construct(
+        protected FieldModel $leadFieldModel,
+        protected EmailValidator $emailValidator,
+        protected CompanyDeduper $companyDeduper,
+        EntityManagerInterface $em,
+        CorePermissions $security,
+        EventDispatcherInterface $dispatcher,
+        UrlGeneratorInterface $router,
+        Translator $translator,
+        UserHelper $userHelper,
+        LoggerInterface $mauticLogger,
+        CoreParametersHelper $coreParametersHelper,
+        private FieldList $fieldList,
+        private readonly CompanyRepository $companyRepository,
+        private readonly CompanyLeadRepository $companyLeadRepository,
+        private readonly LeadRepository $leadRepository,
+        private readonly UserRepository $userRepository,
+    ) {
+        parent::__construct($em, $security, $dispatcher, $router, $translator, $userHelper, $mauticLogger, $coreParametersHelper);
+    }
+
+    /**
+     * @param Company $entity
+     * @param bool    $unlock
+     */
+    public function saveEntity($entity, $unlock = true): void
+    {
+        // Update leads primary company name
+        $this->setEntityDefaultValues($entity, 'company');
+
+        parent::saveEntity($entity, $unlock);
+    }
+
+    /**
+     * Save an array of entities.
+     *
+     * @param array $entities
+     * @param bool  $unlock
+     */
+    public function saveEntities($entities, $unlock = true): void
+    {
+        // Update leads primary company name
+        foreach ($entities as $entity) {
+            $this->setEntityDefaultValues($entity, 'company');
+        }
+        parent::saveEntities($entities, $unlock);
+    }
+
+    public function getRepository(): CompanyRepository
+    {
+        if (!$this->repoSetup) {
+            $this->repoSetup = true;
+            // set the point trigger model in order to get the color code for the lead
+            $fields = $this->fieldList->getFieldList(true, true, ['isPublished' => true, 'object' => 'company']);
+
+            $searchFields = [];
+            foreach ($fields as $groupFields) {
+                $searchFields = array_merge($searchFields, array_keys($groupFields));
+            }
+            $this->companyRepository->setAvailableSearchFields($searchFields);
+        }
+
+        return $this->companyRepository;
+    }
+
+    public function getCompanyLeadRepository(): CompanyLeadRepository
+    {
+        return $this->companyLeadRepository;
+    }
+
+    public function getPermissionBase(): string
+    {
+        // We are using lead:leads in the CompanyController so this should match to prevent a BC break
+        return 'lead:leads';
+    }
+
+    public function getNameGetter(): string
+    {
+        return 'getPrimaryIdentifier';
+    }
+
+    /**
+     * @throws MethodNotAllowedHttpException
+     */
+    public function createForm($entity, FormFactoryInterface $formFactory, $action = null, $options = []): FormInterface
+    {
+        if (!$entity instanceof Company) {
+            throw new MethodNotAllowedHttpException(['Company']);
+        }
+        if (!empty($action)) {
+            $options['action'] = $action;
+        }
+
+        return $formFactory->create(CompanyType::class, $entity, $options);
+    }
+
+    public function getEntity($id = null): ?Company
+    {
+        if (null === $id) {
+            return new Company();
+        }
+
+        return parent::getEntity($id);
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getUserCompanies()
+    {
+        $user = (!$this->security->isGranted('lead:leads:viewother')) ?
+            $this->userHelper->getUser() : false;
+
+        return $this->companyRepository->getCompanies($user);
+    }
+
+    /**
+     * Reorganizes a field list to be keyed by field's group then alias.
+     */
+    public function organizeFieldsByGroup($fields): array
+    {
+        $array = [];
+
+        foreach ($fields as $field) {
+            if ($field instanceof LeadField) {
+                $alias = $field->getAlias();
+                if ('company' === $field->getObject()) {
+                    $group                          = $field->getGroup();
+                    $array[$group][$alias]['id']    = $field->getId();
+                    $array[$group][$alias]['group'] = $group;
+                    $array[$group][$alias]['label'] = $field->getLabel();
+                    $array[$group][$alias]['alias'] = $alias;
+                    $array[$group][$alias]['type']  = $field->getType();
+                }
+            } else {
+                $alias   = $field['alias'];
+                $field[] = $alias;
+                if ('company' === $field['object']) {
+                    $group                          = $field['group'];
+                    $array[$group][$alias]['id']    = $field['id'];
+                    $array[$group][$alias]['group'] = $group;
+                    $array[$group][$alias]['label'] = $field['label'];
+                    $array[$group][$alias]['alias'] = $alias;
+                    $array[$group][$alias]['type']  = $field['type'];
+                }
+            }
+        }
+
+        // make sure each group key is present
+        $groups = ['core', 'social', 'personal', 'professional'];
+        foreach ($groups as $g) {
+            if (!isset($array[$g])) {
+                $array[$g] = [];
+            }
+        }
+
+        return $array;
+    }
+
+    /**
+     * Populates custom field values for updating the company.
+     */
+    public function setFieldValues(Company $company, array $data, bool $overwriteWithBlank = false): void
+    {
+        // save the field values
+        $fieldValues = $company->getFields();
+
+        if (empty($fieldValues)) {
+            // Lead is new or they haven't been populated so let's build the fields now
+            if (empty($this->fields)) {
+                $this->fields = $this->leadFieldModel->getEntities(
+                    [
+                        'filter'         => ['object' => 'company'],
+                        'hydration_mode' => 'HYDRATE_ARRAY',
+                        'result_cache'   => new ResultCacheOptions(LeadField::CACHE_NAMESPACE),
+                    ]
+                );
+                $this->fields = $this->organizeFieldsByGroup($this->fields);
+            }
+            $fieldValues = $this->fields;
+        }
+
+        // update existing values
+        foreach ($fieldValues as &$groupFields) {
+            foreach ($groupFields as $alias => &$field) {
+                if (!isset($field['value'])) {
+                    $field['value'] = null;
+                }
+                // Only update fields that are part of the passed $data array
+                if (array_key_exists($alias, $data)) {
+                    $curValue = $field['value'];
+                    $newValue = $data[$alias];
+
+                    if (is_array($newValue)) {
+                        $newValue = implode('|', $newValue);
+                    }
+
+                    if ($curValue !== $newValue && ('' !== (string) $newValue || $overwriteWithBlank)) {
+                        $field['value'] = $newValue;
+                        $company->addUpdatedField($alias, $newValue, $curValue);
+                    }
+                }
+            }
+        }
+        $company->setFields($fieldValues);
+    }
+
+    /**
+     * @param array|Company $companies
+     * @param array|Lead    $lead
+     *
+     * @throws \Doctrine\ORM\ORMException
+     */
+    public function addLeadToCompany($companies, $lead): bool
+    {
+        // Primary company name to be persisted to the lead's contact company field
+        $companyName        = '';
+        $companyLeadAdd     = [];
+        $searchForCompanies = [];
+
+        $dateManipulated = new \DateTime();
+
+        if (!$lead instanceof Lead) {
+            $leadId = (is_array($lead) && isset($lead['id'])) ? $lead['id'] : $lead;
+            $lead   = $this->em->getReference(Lead::class, $leadId);
+        }
+
+        if ($companies instanceof Company) {
+            $companyLeadAdd[$companies->getId()] = $companies;
+            $companies                           = [$companies->getId()];
+        } elseif (!is_array($companies)) {
+            $companies = [$companies];
+        }
+
+        // make sure they are ints
+        foreach ($companies as &$l) {
+            $l = (int) $l;
+
+            if (!isset($companyLeadAdd[$l])) {
+                $searchForCompanies[] = $l;
+            }
+        }
+
+        if ([] !== $searchForCompanies) {
+            $companyEntities = $this->getEntities([
+                'filter' => [
+                    'force' => [
+                        [
+                            'column' => 'comp.id',
+                            'expr'   => 'in',
+                            'value'  => $searchForCompanies,
+                        ],
+                    ],
+                ],
+            ]);
+
+            foreach ($companyEntities as $company) {
+                $companyLeadAdd[$company->getId()] = $company;
+            }
+        }
+
+        unset($companyEntities, $searchForCompanies);
+
+        $persistCompany = [];
+        $dispatchEvents = [];
+        $contactAdded   = false;
+        foreach ($companies as $companyId) {
+            if (!isset($companyLeadAdd[$companyId])) {
+                // List no longer exists in the DB so continue to the next
+                continue;
+            }
+
+            $companyLead = $this->companyLeadRepository->findOneBy(
+                [
+                    'lead'    => $lead,
+                    'company' => $companyLeadAdd[$companyId],
+                ]
+            );
+
+            if (null != $companyLead) {
+                // Detach from Doctrine
+                $this->em->detach($companyLead);
+
+                continue;
+            }
+            $companyLead = new CompanyLead();
+            $companyLead->setCompany($companyLeadAdd[$companyId]);
+            $companyLead->setLead($lead);
+            $companyLead->setDateAdded($dateManipulated);
+            $contactAdded     = true;
+            $persistCompany[] = $companyLead;
+            $dispatchEvents[] = $companyId;
+
+            if (!$companyName) {
+                // CompanyLeadRepository::saveEntities will set the first company of the batch as primary so
+                // use the first company name to ensure they match
+                $companyName = $companyLeadAdd[$companyId]->getName();
+            }
+        }
+
+        if ([] !== $persistCompany) {
+            $this->companyLeadRepository->saveEntities($persistCompany);
+        }
+
+        if (!empty($companyName)) {
+            // Set the contact's primary company to the first company added in the batch
+            // This must happen before LeadEvents::LEAD_COMPANY_CHANGE to ensure the Lead::getCompany has the correct value
+            $currentCompanyName = $lead->getCompany();
+            if ($currentCompanyName !== $companyName) {
+                $lead->addUpdatedField('company', $companyName)
+                    ->setDateModified(new \DateTime());
+
+                $this->leadRepository->saveEntity($lead);
+            }
+        }
+
+        if ([] !== $dispatchEvents && $this->dispatcher->hasListeners(LeadEvents::LEAD_COMPANY_CHANGE)) {
+            foreach ($dispatchEvents as $companyId) {
+                $event = new LeadChangeCompanyEvent($lead, $companyLeadAdd[$companyId]);
+                $this->dispatcher->dispatch($event, LeadEvents::LEAD_COMPANY_CHANGE);
+
+                unset($event);
+            }
+        }
+
+        // Clear CompanyLead entities from Doctrine memory
+        $this->companyLeadRepository->detachEntities($persistCompany);
+
+        return $contactAdded;
+    }
+
+    /**
+     * @throws \Doctrine\ORM\ORMException
+     */
+    public function removeLeadFromCompany($companies, $lead): void
+    {
+        if (!$lead instanceof Lead) {
+            $leadId = (is_array($lead) && isset($lead['id'])) ? $lead['id'] : $lead;
+            $lead   = $this->em->getReference(Lead::class, $leadId);
+        }
+
+        $companyLeadRemove = [];
+        if (!$companies instanceof Company) {
+            // make sure they are ints
+            $searchForCompanies = [];
+            foreach ($companies as &$l) {
+                $l                    = (int) $l;
+                $searchForCompanies[] = $l;
+            }
+            if ([] !== $searchForCompanies) {
+                $companyEntities = $this->getEntities(
+                    [
+                        'filter' => [
+                            'force' => [
+                                [
+                                    'column' => 'comp.id',
+                                    'expr'   => 'in',
+                                    'value'  => $searchForCompanies,
+                                ],
+                            ],
+                        ],
+                    ]
+                );
+
+                foreach ($companyEntities as $company) {
+                    $companyLeadRemove[$company->getId()] = $company;
+                }
+            }
+
+            unset($companyEntities, $searchForCompanies);
+        } else {
+            $companyLeadRemove[$companies->getId()] = $companies;
+
+            $companies = [$companies->getId()];
+        }
+
+        if (!is_array($companies)) {
+            $companies = [$companies];
+        }
+
+        $deleteCompany     = [];
+        $dispatchEvents    = [];
+        $deleteCompanyLead = [];
+
+        $primaryRemoved = false;
+        foreach ($companies as $companyId) {
+            if (!isset($companyLeadRemove[$companyId])) {
+                continue;
+            }
+
+            /** @var CompanyLead $companyLead */
+            $companyLead = $this->companyLeadRepository->findOneBy(
+                [
+                    'lead'    => $lead,
+                    'company' => $companyLeadRemove[$companyId],
+                ]
+            );
+
+            if (null == $companyLead) {
+                // Lead is not part of this list
+                continue;
+            }
+
+            // Lead was manually added and now manually removed or was not manually added and now being removed
+            $deleteCompanyLead[] = $companyLead;
+            $dispatchEvents[]    = $companyId;
+
+            // Update the Lead's primary company name if removed from the primary company
+            if (!$primaryRemoved) {
+                $primaryRemoved = $companyLead->getPrimary();
+            }
+
+            unset($companyLead);
+        }
+
+        if ([] !== $deleteCompanyLead) {
+            $this->companyLeadRepository->deleteEntities($deleteCompanyLead);
+        }
+
+        if ($primaryRemoved) {
+            // Set the contact's primary company to a remaining company or empty it out if none are left
+            // This must happen before LeadEvents::LEAD_COMPANY_CHANGE to ensure the Lead::getCompany has the correct value
+            $this->updateContactAfterPrimaryCompanyWasRemoved($lead);
+        }
+
+        // Clear CompanyLead entities from Doctrine memory
+        $this->companyLeadRepository->detachEntities($deleteCompanyLead);
+
+        if ([] !== $dispatchEvents && $this->dispatcher->hasListeners(LeadEvents::LEAD_COMPANY_CHANGE)) {
+            foreach ($dispatchEvents as $companyId) {
+                $event = new LeadChangeCompanyEvent($lead, $companyLeadRemove[$companyId], false);
+                $this->dispatcher->dispatch($event, LeadEvents::LEAD_COMPANY_CHANGE);
+
+                unset($event);
+            }
+        }
+
+        unset($lead, $deleteCompany, $companies);
+    }
+
+    /**
+     * Get a list of companies with names only.
+     *
+     * @param mixed[]|string $filter
+     *
+     * @return string[]
+     */
+    public function getSimpleLookupResults(string $type, array|string $filter = '', int $limit = 10, int $start = 0, ?string $exclude = ''): array
+    {
+        $valueColumn = 'id';
+        if (!in_array($type, ['companyfield', 'lead.company'])) {
+            return [];
+        }
+        if ('lead.company' === $type) {
+            $column    = 'companyname';
+            $filterVal = $filter;
+        } else {
+            if (is_array($filter)) {
+                $column    = $filter[0];
+                $filterVal = $filter[1];
+            } else {
+                $column = $filter;
+            }
+        }
+
+        $expr      = new ExpressionBuilder($this->em->getConnection());
+        $composite = $expr->and($expr->like("comp.{$column}", ':filterVar'));
+
+        // Exclude company if $exclude is provided
+        if ('' !== $exclude) {
+            $composite = $expr->and(
+                $composite,
+                $expr->neq('comp.id', $exclude)
+            );
+        }
+
+        // Validate owner permissions
+        if (!$this->security->isGranted('lead:leads:viewother')) {
+            $composite->with(
+                $expr->or(
+                    $expr->and(
+                        $expr->isNull('comp.owner_id'),
+                        $expr->eq('comp.created_by', (int) $this->userHelper->getUser()->getId())
+                    ),
+                    $expr->eq('comp.owner_id', (int) $this->userHelper->getUser()->getId())
+                )
+            );
+        }
+
+        return $this->getRepository()->getAjaxSimpleList($composite, ['filterVar' => $filterVal.'%'], $column, $valueColumn);
+    }
+
+    /**
+     * Get list of entities for autopopulate fields.
+     *
+     * @param string|array<int,string> $filter
+     * @param array<string, mixed>     $options
+     *
+     * @return array<mixed>
+     */
+    public function getLookupResults(string $type, string|array $filter = '', int $limit = 10, int $start = 0, array $options = []): array
+    {
+        $results = [];
+        switch ($type) {
+            case 'companyfield':
+            case 'lead.company':
+                if ('lead.company' === $type) {
+                    $column    = 'companyname';
+                    $filterVal = $filter;
+                } else {
+                    if (is_array($filter)) {
+                        $column    = $filter[0];
+                        $filterVal = $filter[1];
+                    } else {
+                        $column = $filter;
+                    }
+                }
+
+                $expr      = new ExpressionBuilder($this->em->getConnection());
+                $composite = $expr->and($expr->like("comp.{$column}", ':filterVar'));
+
+                // Validate owner permissions
+                if (!$this->security->isGranted('lead:leads:viewother')) {
+                    $composite->with(
+                        $expr->or(
+                            $expr->and(
+                                $expr->isNull('comp.owner_id'),
+                                $expr->eq('comp.created_by', (int) $this->userHelper->getUser()->getId())
+                            ),
+                            $expr->eq('comp.owner_id', (int) $this->userHelper->getUser()->getId())
+                        )
+                    );
+                }
+
+                $results = $this->getRepository()->getAjaxSimpleList(
+                    $composite,
+                    ['filterVar' => $filterVal.'%'],
+                    $column,
+                    'id',
+                    $limit,
+                    $start
+                );
+
+                break;
+        }
+
+        return $results;
+    }
+
+    /**
+     * @throws MethodNotAllowedHttpException
+     */
+    protected function dispatchEvent($action, &$entity, $isNew = false, ?Event $event = null): ?Event
+    {
+        if (!$entity instanceof Company) {
+            throw new MethodNotAllowedHttpException(['Email']);
+        }
+
+        switch ($action) {
+            case 'pre_save':
+                $name = LeadEvents::COMPANY_PRE_SAVE;
+                break;
+            case 'post_save':
+                $name = LeadEvents::COMPANY_POST_SAVE;
+                break;
+            case 'pre_delete':
+                $name = LeadEvents::COMPANY_PRE_DELETE;
+                break;
+            case 'post_delete':
+                $name = LeadEvents::COMPANY_POST_DELETE;
+                break;
+            default:
+                return null;
+        }
+
+        if ($this->dispatcher->hasListeners($name)) {
+            if (!$event instanceof Event) {
+                $event = new CompanyEvent($entity, $isNew);
+                $event->setEntityManager($this->em);
+            }
+
+            $this->dispatcher->dispatch($event, $name);
+
+            return $event;
+        }
+
+        return null;
+    }
+
+    /**
+     * Company Merge function, will merge $mainCompany with $secCompany -  empty records from main company will be
+     * filled with secondary then secondary will be deleted.
+     *
+     * @return mixed
+     */
+    public function companyMerge($mainCompany, $secCompany)
+    {
+        $this->logger->debug('COMPANY: Merging companies');
+
+        $mainCompanyId = $mainCompany->getId();
+        $secCompanyId  = $secCompany->getId();
+
+        // if they are the same lead, then just return one
+        if ($mainCompanyId === $secCompanyId) {
+            return $mainCompany;
+        }
+        // merge fields
+        $mergeSecFields    = $secCompany->getFields();
+        $mainCompanyFields = $mainCompany->getFields();
+        foreach ($mergeSecFields as $group => $groupFields) {
+            foreach ($groupFields as $alias => $details) {
+                // fill in empty main company fields with secondary company fields
+                if (empty($mainCompanyFields[$group][$alias]['value']) && !empty($details['value'])) {
+                    $mainCompany->addUpdatedField($alias, $details['value']);
+                    $this->logger->debug('Company: Updated '.$alias.' = '.$details['value']);
+                }
+            }
+        }
+
+        // merge owner
+        $mainCompanyOwner = $mainCompany->getOwner();
+        $secCompanyOwner  = $secCompany->getOwner();
+
+        if (null === $mainCompanyOwner && null !== $secCompanyOwner) {
+            $mainCompany->setOwner($secCompanyOwner);
+        }
+
+        // move all leads from secondary company to main company
+        $secCompanyLeads = $this->companyLeadRepository->getCompanyLeads($secCompanyId);
+
+        foreach ($secCompanyLeads as $lead) {
+            $this->addLeadToCompany($mainCompany->getId(), $lead['lead_id']);
+        }
+
+        $event = new CompanyMergeEvent($mainCompany, $secCompany);
+        $this->dispatcher->dispatch($event, LeadEvents::COMPANY_PRE_MERGE);
+
+        // save the updated company
+        $this->saveEntity($mainCompany, false);
+
+        $this->dispatcher->dispatch($event, LeadEvents::COMPANY_POST_MERGE);
+
+        // delete the old company
+        $this->deleteEntity($secCompany);
+
+        // return the merged company
+        return $mainCompany;
+    }
+
+    /**
+     * @return array
+     */
+    public function fetchCompanyFields()
+    {
+        if (empty($this->companyFields)) {
+            $this->companyFields = $this->leadFieldModel->getEntities(
+                [
+                    'filter' => [
+                        'force' => [
+                            [
+                                'column' => 'f.isPublished',
+                                'expr'   => 'eq',
+                                'value'  => true,
+                            ],
+                            [
+                                'column' => 'f.object',
+                                'expr'   => 'eq',
+                                'value'  => 'company',
+                            ],
+                        ],
+                    ],
+                    'hydration_mode' => 'HYDRATE_ARRAY',
+                    'result_cache'   => new ResultCacheOptions(LeadField::CACHE_NAMESPACE),
+                ]
+            );
+        }
+
+        return $this->companyFields;
+    }
+
+    public function extractCompanyDataFromImport(array &$mappedFields, array &$data): array
+    {
+        $companyData    = [];
+        $companyFields  = [];
+        $internalFields = $this->fetchCompanyFields();
+
+        if (!isset($mappedFields['companyname']) && isset($mappedFields['company'])) {
+            $mappedFields['companyname'] = $mappedFields['company'];
+
+            unset($mappedFields['company']);
+        }
+
+        foreach ($mappedFields as $mauticField => $importField) {
+            foreach ($internalFields as $entityField) {
+                if ($entityField['alias'] === $mauticField) {
+                    $companyData[$importField]   = $data[$importField];
+                    $companyFields[$mauticField] = $importField;
+                    unset($data[$importField]);
+                    unset($mappedFields[$mauticField]);
+                    break;
+                }
+            }
+        }
+
+        return [$companyFields, $companyData];
+    }
+
+    /**
+     * @param array<string>   $fields
+     * @param array<mixed>    $data
+     * @param int|string|null $owner
+     */
+    public function import(array $fields, array $data, $owner = null, bool $skipIfExists = false, bool $createNew = true): bool
+    {
+        $company = $this->importCompany($fields, $data, $owner, false, $skipIfExists, $createNew);
+
+        if (null === $company) {
+            throw new \Exception($this->translator->trans('mautic.lead.import.unique_field_not_exist', [], 'flashes'));
+        }
+
+        $merged = !$company->isNew();
+
+        $this->saveEntity($company);
+
+        return $merged;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function importCompany(array $fields, array $data, $owner = null, $persist = true, $skipIfExists = false, bool $createNew = true): ?Company
+    {
+        try {
+            $duplicateCompanies = $this->companyDeduper->checkForDuplicateCompanies($this->getFieldData($fields, $data));
+        } catch (UniqueFieldNotFoundException) {
+            return null;
+        }
+
+        $company = $duplicateCompanies[0] ?? new Company();
+
+        if (!$createNew && $company->isNew()) {
+            throw new \Exception($this->translator->trans('mautic.lead.import.creating_companies_disabled'));
+        }
+
+        if (!$company->isNew() && !$this->existDataForUpdate($fields, $data)) {
+            return $company;
+        }
+
+        if ($company->isNew()) {
+            $granted = $this->security->isGranted('lead:leads:create');
+        } else {
+            $granted = $this->security->hasEntityAccess(
+                'lead:leads:editown',
+                'lead:leads:editother',
+                $company->getPermissionUser()
+            );
+        }
+
+        if (!$granted) {
+            throw new \Exception($this->translator->trans('mautic.lead.import.error.unauthorized', ['%username%' => $this->userHelper->getUser()->getUserIdentifier()]));
+        }
+
+        if (!empty($fields['dateAdded']) && !empty($data[$fields['dateAdded']])) {
+            $dateAdded = new DateTimeHelper($data[$fields['dateAdded']]);
+            $company->setDateAdded($dateAdded->getUtcDateTime());
+        }
+        unset($fields['dateAdded']);
+
+        if (!empty($fields['dateModified']) && !empty($data[$fields['dateModified']])) {
+            $dateModified = new DateTimeHelper($data[$fields['dateModified']]);
+            $company->setDateModified($dateModified->getUtcDateTime());
+        }
+        unset($fields['dateModified']);
+
+        if (!empty($fields['createdByUser']) && !empty($data[$fields['createdByUser']])) {
+            $createdByUser = $this->userRepository->findByIdentifier($data[$fields['createdByUser']]);
+            if (null !== $createdByUser) {
+                $company->setCreatedBy($createdByUser);
+            }
+        }
+        unset($fields['createdByUser']);
+
+        if (!empty($fields['modifiedByUser']) && !empty($data[$fields['modifiedByUser']])) {
+            $modifiedByUser = $this->userRepository->findByIdentifier($data[$fields['modifiedByUser']]);
+            if (null !== $modifiedByUser) {
+                $company->setModifiedBy($modifiedByUser);
+            }
+        }
+        unset($fields['modifiedByUser']);
+
+        if (null !== $owner) {
+            $company->setOwner($this->em->getReference(User::class, $owner));
+        }
+
+        $fieldData = $this->getFieldData($fields, $data);
+
+        $fieldErrors = [];
+
+        foreach ($this->fetchCompanyFields() as $entityField) {
+            // Skip If value already exists
+            if ($skipIfExists && !$company->isNew() && !empty($company->getProfileFields()[$entityField['alias']])) {
+                unset($fieldData[$entityField['alias']]);
+                continue;
+            }
+
+            if (isset($fieldData[$entityField['alias']])) {
+                $fieldData = $this->getCleanedFieldData($entityField, $fieldData);
+
+                if ('NULL' === $fieldData[$entityField['alias']]) {
+                    $fieldData[$entityField['alias']] = null;
+
+                    continue;
+                }
+
+                try {
+                    $this->cleanFields($fieldData, $entityField);
+                } catch (\Exception $exception) {
+                    $fieldErrors[] = $entityField['alias'].': '.$exception->getMessage();
+                }
+
+                // Skip if the value is in the CSV row
+                continue;
+            }
+            if ($company->isNew() && $entityField['defaultValue']) {
+                // Fill in the default value if any
+                $fieldData[$entityField['alias']] = ('multiselect' === $entityField['type']) ? [$entityField['defaultValue']] : $entityField['defaultValue'];
+            }
+        }
+
+        if ([] !== $fieldErrors) {
+            $fieldErrors = implode("\n", $fieldErrors);
+
+            throw new \Exception($fieldErrors);
+        }
+
+        // All clear
+        foreach ($fieldData as $field => $value) {
+            $company->addUpdatedField($field, $value);
+        }
+
+        if ($persist) {
+            $this->saveEntity($company);
+        }
+
+        return $company;
+    }
+
+    /**
+     * @return mixed[]
+     */
+    public function checkForDuplicateCompanies(array $queryFields): array
+    {
+        return $this->companyDeduper->checkForDuplicateCompanies($queryFields);
+    }
+
+    /**
+     * @param array $fields
+     */
+    protected function getFieldData($fields, array $data): array
+    {
+        // Set profile data using the form so that values are validated
+        $fieldData = [];
+        foreach ($fields as $importField => $entityField) {
+            // Prevent overwriting existing data with empty data
+            if (array_key_exists($importField, $data) && null !== $data[$importField] && '' != $data[$importField]) {
+                $fieldData[$entityField] = $data[$importField];
+            }
+        }
+
+        return $fieldData;
+    }
+
+    private function updateContactAfterPrimaryCompanyWasRemoved(Lead $lead): void
+    {
+        $primaryCompanyName = '';
+        $companyLead        = null;
+
+        // Find another company to make primary if applicable
+        $leadCompanies = $this->companyLeadRepository->getCompaniesByLeadId($lead->getId());
+        if (count($leadCompanies)) {
+            $newPrimaryArray   = reset($leadCompanies);
+            $newPrimaryCompany = $this->em->getReference(Company::class, $newPrimaryArray['company_id']);
+
+            /** @var CompanyLead $companyLead */
+            $companyLead = $this->companyLeadRepository->findOneBy(
+                [
+                    'lead'    => $lead,
+                    'company' => $newPrimaryCompany,
+                ]
+            );
+
+            $companyLead->setPrimary(true);
+            $this->companyLeadRepository->saveEntity($companyLead);
+
+            $primaryCompanyName = $newPrimaryArray['companyname'];
+        }
+
+        $lead->addUpdatedField('company', $primaryCompanyName)
+            ->setDateModified(new \DateTime());
+        $this->leadRepository->saveEntity($lead);
+
+        if (null !== $companyLead) {
+            $this->companyLeadRepository->detachEntity($companyLead);
+        }
+    }
+
+    /**
+     * @param Company $entity
+     */
+    public function deleteEntity($entity): void
+    {
+        $this->dispatchEvent('pre_delete', $entity);
+        $entity->setDeleted(new \DateTime());
+        $this->getRepository()->saveEntity($entity);
+
+        $event = new CompanyEvent($entity);
+        $this->dispatcher->dispatch($event, LeadEvents::COMPANY_SOFT_DELETE);
+    }
+
+    /**
+     * @param array<int> $ids
+     *
+     * @return array<int,Company>
+     */
+    public function deleteEntities($ids): array
+    {
+        $entities = [];
+        foreach ($ids as $companyId) {
+            $company = $this->getEntity($companyId);
+            if ($company) {
+                $entities[$companyId] = $company;
+                $this->deleteEntity($company);
+            }
+        }
+
+        return $entities;
+    }
+
+    public function permanentDeleteCompany(Company $company): void
+    {
+        $company->deletedId = $company->getId();
+        $this->getRepository()->deleteEntity($company);
+        $this->dispatchEvent('post_delete', $company);
+    }
+
+    public function changePrimaryCompanyToLatest(int $companyId): void
+    {
+        while ($companyLeads = $this->companyLeadRepository->findBy(['company' => $companyId, 'primary' => 1], [], CompanyLeadRepository::BATCH_SIZE, 0)) {
+            foreach ($companyLeads as $companyLead) {
+                $this->removeLeadFromCompany($companyLead->getCompany(), $companyLead->getlead());
+            }
+        }
+    }
+
+    public function deleteCompanyPermanently(int $companyId): void
+    {
+        $company = $this->getRepository()->find($companyId);
+
+        if ($company) {
+            $this->permanentDeleteCompany($company);
+        }
+    }
+
+    /**
+     * @param mixed[] $fields
+     * @param mixed[] $data
+     */
+    private function existDataForUpdate(array $fields, array $data): bool
+    {
+        $updateData = $this->getFieldData($fields, $data);
+        $uniqueData = $this->companyDeduper->getUniqueData($updateData);
+
+        return (bool) array_diff_assoc($updateData, $uniqueData);
+    }
+
+    /**
+     * @param array<mixed> $fieldData
+     *
+     * @return array<mixed>
+     */
+    private function getCleanedFieldData(mixed $entityField, array $fieldData): array
+    {
+        $fieldData[$entityField['alias']] = InputHelper::_(
+            $fieldData[$entityField['alias']],
+            'html' === $entityField['type'] ? 'html' : 'string'
+        );
+
+        return $fieldData;
+    }
+}

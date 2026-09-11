@@ -1,0 +1,187 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\CampaignBundle\Executioner\ContactFinder\Limiter;
+
+use Mautic\CampaignBundle\Executioner\Exception\NoContactsFoundException;
+
+final class ContactLimiter
+{
+    private readonly int $batchLimit;
+
+    private readonly ?int $contactId;
+
+    private readonly ?int $minContactId;
+
+    private ?int $batchMinContactId = null;
+
+    private readonly ?int $maxContactId;
+
+    private ?int $threadId = null;
+
+    private ?int $maxThreads = null;
+
+    /**
+     * @var int|null
+     */
+    private $campaignLimit;
+
+    private ?int $campaignLimitUsed = null;
+
+    /**
+     * @param int      $batchLimit
+     * @param int|null $contactId
+     * @param int|null $minContactId
+     * @param int|null $maxContactId
+     * @param int|null $threadId
+     * @param int|null $maxThreads
+     * @param int|null $campaignLimit
+     */
+    public function __construct(
+        $batchLimit,
+        $contactId = null,
+        $minContactId = null,
+        $maxContactId = null,
+        private readonly array $contactIdList = [],
+        $threadId = null,
+        $maxThreads = null,
+        $campaignLimit = null,
+    ) {
+        $this->batchLimit    = ($batchLimit) ? (int) $batchLimit : 100;
+        $this->contactId     = ($contactId) ? (int) $contactId : null;
+        $this->minContactId  = ($minContactId) ? (int) $minContactId : null;
+        $this->maxContactId  = ($maxContactId) ? (int) $maxContactId : null;
+
+        if ($threadId && $maxThreads) {
+            $this->threadId     = (int) $threadId;
+            $this->maxThreads   = (int) $maxThreads;
+
+            if ($threadId > $maxThreads) {
+                throw new \InvalidArgumentException('$threadId cannot be larger than $maxThreads');
+            }
+        }
+
+        if ($campaignLimit) {
+            $this->campaignLimit     = $campaignLimit;
+            $this->campaignLimitUsed = 0;
+        }
+    }
+
+    public function getBatchLimit(): int
+    {
+        return $this->batchLimit;
+    }
+
+    public function getContactId(): ?int
+    {
+        return $this->contactId;
+    }
+
+    public function getMinContactId(): ?int
+    {
+        return $this->batchMinContactId ?: $this->minContactId;
+    }
+
+    public function getMaxContactId(): ?int
+    {
+        return $this->maxContactId;
+    }
+
+    public function getContactIdList(): array
+    {
+        return $this->contactIdList;
+    }
+
+    /**
+     * @param int $id
+     *
+     * @throws NoContactsFoundException
+     */
+    public function setBatchMinContactId($id): static
+    {
+        // Prevent a never ending loop if the contact ID never changes due to being the last batch of contacts
+        if ($this->minContactId && $this->minContactId > (int) $id) {
+            throw new NoContactsFoundException();
+        }
+
+        // We've surpasssed the max so bai
+        if ($this->maxContactId && $this->maxContactId < (int) $id) {
+            throw new NoContactsFoundException();
+        }
+
+        // The same batch of contacts were somehow processed so let's stop to prevent the loop
+        if ($this->batchMinContactId && $this->batchMinContactId >= $id) {
+            throw new NoContactsFoundException();
+        }
+
+        $this->batchMinContactId = (int) $id;
+
+        return $this;
+    }
+
+    public function resetBatchMinContactId(): static
+    {
+        $this->batchMinContactId =  null;
+
+        return $this;
+    }
+
+    public function getMaxThreads(): ?int
+    {
+        return $this->maxThreads;
+    }
+
+    public function getThreadId(): ?int
+    {
+        return $this->threadId;
+    }
+
+    /**
+     * @return int|null
+     */
+    public function getCampaignLimit()
+    {
+        return $this->campaignLimit;
+    }
+
+    public function hasCampaignLimit(): bool
+    {
+        return null !== $this->campaignLimit;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function getCampaignLimitRemaining(): int
+    {
+        if (!$this->hasCampaignLimit()) {
+            throw new \Exception('Campaign Limit was not set');
+        }
+
+        return $this->campaignLimit - $this->campaignLimitUsed;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function reduceCampaignLimitRemaining($reduction): static
+    {
+        if (!$this->hasCampaignLimit()) {
+            throw new \Exception('Campaign Limit was not set');
+        }
+        if ($this->campaignLimit < ($this->campaignLimitUsed + $reduction)) {
+            throw new \Exception('Campaign Limit exceeded');
+        }
+        $this->campaignLimitUsed += $reduction;
+
+        return $this;
+    }
+
+    public function resetCampaignLimitRemaining(): static
+    {
+        $this->campaignLimitUsed = 0;
+
+        return $this;
+    }
+}

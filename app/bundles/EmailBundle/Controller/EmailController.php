@@ -1,0 +1,1899 @@
+<?php
+
+namespace Mautic\EmailBundle\Controller;
+
+use Mautic\AssetBundle\Model\AssetModel;
+use Mautic\CoreBundle\Controller\FormController;
+use Mautic\CoreBundle\Controller\FormErrorMessagesTrait;
+use Mautic\CoreBundle\Controller\QuickFilterSearchTrait;
+use Mautic\CoreBundle\Factory\PageHelperFactoryInterface;
+use Mautic\CoreBundle\Form\Type\ContentPreviewSettingsType;
+use Mautic\CoreBundle\Form\Type\DateRangeType;
+use Mautic\CoreBundle\Helper\InputHelper;
+use Mautic\CoreBundle\Helper\ThemeHelper;
+use Mautic\CoreBundle\Model\AbTest\AbTestResultService;
+use Mautic\CoreBundle\Model\AbTest\AbTestSettingsService;
+use Mautic\CoreBundle\Model\AuditLogModel;
+use Mautic\CoreBundle\Security\Permissions\CorePermissions;
+use Mautic\EmailBundle\EmailEvents;
+use Mautic\EmailBundle\Entity\Email;
+use Mautic\EmailBundle\Event\EmailEditSubmitEvent;
+use Mautic\EmailBundle\Event\ManualWinnerEvent;
+use Mautic\EmailBundle\Form\Type\BatchSendType;
+use Mautic\EmailBundle\Form\Type\ExampleSendType;
+use Mautic\EmailBundle\Form\Type\ScheduleSendType;
+use Mautic\EmailBundle\Helper\EmailConfig;
+use Mautic\EmailBundle\Helper\EmailSearchScopeProvider;
+use Mautic\EmailBundle\Model\EmailModel;
+use Mautic\LeadBundle\Controller\EntityContactsTrait;
+use Mautic\LeadBundle\Entity\LeadRepository;
+use Mautic\LeadBundle\Helper\FakeContactHelper;
+use Mautic\LeadBundle\Model\LeadModel;
+use Mautic\LeadBundle\Model\ListModel;
+use Mautic\PageBundle\Exception\InvalidRenderedHtmlException;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
+use Symfony\Contracts\Service\Attribute\Required;
+
+final class EmailController extends FormController
+{
+    use FormErrorMessagesTrait;
+    use EntityContactsTrait;
+    use QuickFilterSearchTrait;
+
+    private LeadRepository $leadRepository;
+
+    private EmailModel $emailModel;
+
+    private ListModel $listModel;
+
+    private AuditLogModel $auditLogModel;
+
+    #[Required]
+    public function autowireEmailController(
+        ListModel $listModel,
+        AuditLogModel $auditLogModel,
+        EmailModel $emailModel,
+        LeadRepository $leadRepository,
+    ): void {
+        $this->listModel = $listModel;
+        $this->auditLogModel = $auditLogModel;
+        $this->emailModel = $emailModel;
+        $this->leadRepository = $leadRepository;
+    }
+
+    public const EXAMPLE_EMAIL_SUBJECT_PREFIX = '[TEST]';
+
+    private bool $invalidHtmlError = false;
+
+    /**
+     * @param int $page
+     */
+    public function indexAction(Request $request, EmailModel $model, EmailConfig $emailConfig, ThemeHelper $themeHelper, EmailSearchScopeProvider $emailSearchScopeProvider, $page = 1): Response
+    {
+        $isDraftEnabled = $emailConfig->isDraftEnabled();
+        // set some permissions
+        $permissions = $this->security->isGranted(
+            [
+                'email:emails:viewown',
+                'email:emails:viewother',
+                'email:emails:create',
+                'email:emails:editown',
+                'email:emails:editother',
+                'email:emails:deleteown',
+                'email:emails:deleteother',
+                'email:emails:publishown',
+                'email:emails:publishother',
+            ],
+            'RETURN_ARRAY'
+        );
+
+        if (!$permissions['email:emails:viewown'] && !$permissions['email:emails:viewother']) {
+            $this->throwAccessDenied();
+        }
+
+        $this->setListFilters();
+
+        $session = $request->getSession();
+
+        $listFilters = [
+            'filters' => [
+                'placeholder' => $this->translator->trans('mautic.email.filter.placeholder'),
+                'multiple'    => true,
+            ],
+        ];
+
+        // Reset available groups
+        $listFilters['filters']['groups'] = [];
+
+        // set limits
+        $limit = $session->get('mautic.email.limit', $this->coreParametersHelper->get('default_pagelimit'));
+        $start = (1 === $page) ? 0 : (($page - 1) * $limit);
+        if ($start < 0) {
+            $start = 0;
+        }
+
+        $search = $request->get('search', $session->get('mautic.email.filter', ''));
+        $session->set('mautic.email.filter', $search);
+
+        $filter = [
+            'string' => $search,
+            'force'  => [
+                ['column' => 'e.variantParent,e.translationParent', 'expr' => 'isNull'],
+            ],
+        ];
+        if (!$permissions['email:emails:viewother']) {
+            $filter['force'][] =
+                ['column' => 'e.createdBy', 'expr' => 'eq', 'value' => $this->user->getId()];
+        }
+        $availableLists                                               = $this->listModel->getUserLists();
+        $listFilters['filters']['groups']['mautic.core.filter.lists'] = [
+            'options' => array_column($availableLists, 'name', 'alias'),
+            'prefix'  => 'list',
+        ];
+        $listAliasLookup = array_column($availableLists, 'alias', 'id');
+
+        // retrieve a list of themes
+        $listFilters['filters']['groups']['mautic.core.filter.themes'] = [
+            'options' => $themeHelper->getInstalledThemes('email'),
+            'prefix'  => 'theme',
+        ];
+
+        $currentFilters = $session->get('mautic.email.list_filters', []);
+        $updatedFilters = $request->get('filters', false);
+        $ignoreListJoin = true;
+
+        if ($updatedFilters) {
+            // Filters have been updated
+
+            // Parse the selected values
+            $newFilters     = [];
+            $updatedFilters = json_decode($updatedFilters, true);
+
+            if ($updatedFilters) {
+                foreach ($updatedFilters as $updatedFilter) {
+                    [$column, $filterValue] = explode(':', $updatedFilter);
+
+                    $newFilters[$column][] = $filterValue;
+                }
+
+                $currentFilters = $newFilters;
+            } else {
+                $currentFilters = [];
+            }
+        }
+        $session->set('mautic.email.list_filters', $currentFilters);
+
+        if (!empty($currentFilters)) {
+            $listAliases = $catIds = $templates = $searchFilterTerms = [];
+            foreach ($currentFilters as $type => $typeFilters) {
+                switch ($type) {
+                    case 'list':
+                        $key = 'lists';
+                        break;
+                    case 'category':
+                        $key = 'categories';
+                        break;
+                    case 'theme':
+                        $key = 'themes';
+                        break;
+                }
+
+                $listFilters['filters']['groups']['mautic.core.filter.'.$key]['values'] = $typeFilters;
+
+                foreach ($typeFilters as $fltr) {
+                    switch ($type) {
+                        case 'list':
+                            $resolvedAlias       = $listAliasLookup[(int) $fltr] ?? $fltr;
+                            $listAliases[]       = $resolvedAlias;
+                            $searchFilterTerms[] = 'list:'.$fltr;
+                            $searchFilterTerms[] = 'list:'.$resolvedAlias;
+                            break;
+                        case 'category':
+                            $catIds[]            = (int) $fltr;
+                            $searchFilterTerms[] = 'category:'.$fltr;
+                            break;
+                        case 'theme':
+                            $templates[]         = $fltr;
+                            $searchFilterTerms[] = 'theme:'.$fltr;
+                            break;
+                    }
+                }
+            }
+
+            $search = $this->stripQuickFilterTokensFromSearch($search, $searchFilterTerms);
+            $session->set('mautic.email.filter', $search);
+            $filter['string'] = $search;
+
+            if ([] !== $listAliases) {
+                $filter['force'][] = ['column' => 'l.alias', 'expr' => 'in', 'value' => array_values(array_unique($listAliases))];
+                $ignoreListJoin    = false;
+            }
+
+            if ([] !== $catIds) {
+                $filter['force'][] = ['column' => 'c.id', 'expr' => 'in', 'value' => $catIds];
+            }
+
+            if ([] !== $templates) {
+                $filter['force'][] = ['column' => 'e.template', 'expr' => 'in', 'value' => $templates];
+            }
+        }
+
+        $orderBy    = $session->get('mautic.email.orderby', 'e.dateModified');
+        $orderByDir = $session->get('mautic.email.orderbydir', $this->getDefaultOrderDirection());
+
+        $emails = $model->getEntities(
+            [
+                'start'          => $start,
+                'limit'          => $limit,
+                'filter'         => $filter,
+                'orderBy'        => $orderBy,
+                'orderByDir'     => $orderByDir,
+                'ignoreListJoin' => $ignoreListJoin,
+            ]
+        );
+
+        $count = count($emails);
+        if ($count && $count < ($start + 1)) {
+            // the number of entities are now less then the current page so redirect to the last page
+            if (1 === $count) {
+                $lastPage = 1;
+            } else {
+                $lastPage = (floor($count / $limit)) ?: 1;
+            }
+
+            $session->set('mautic.email.page', $lastPage);
+            $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $lastPage]);
+
+            return $this->postActionRedirect(
+                [
+                    'returnUrl'       => $returnUrl,
+                    'viewParameters'  => ['page' => $lastPage],
+                    'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::indexAction',
+                    'passthroughVars' => [
+                        'activeLink'    => '#mautic_email_index',
+                        'mauticContent' => 'email',
+                    ],
+                ]
+            );
+        }
+        $session->set('mautic.email.page', $page);
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'searchValue'    => $search,
+                    'filters'        => $listFilters,
+                    'items'          => $emails,
+                    'totalItems'     => $count,
+                    'page'           => $page,
+                    'limit'          => $limit,
+                    'tmpl'           => $request->get('tmpl', 'index'),
+                    'permissions'    => $permissions,
+                    'model'          => $model,
+                    'isDraftEnabled' => $isDraftEnabled,
+                    'searchScopes'   => $emailSearchScopeProvider->getScopes(),
+                ],
+                'contentTemplate' => '@MauticEmail/Email/list.html.twig',
+                'passthroughVars' => [
+                    'activeLink'    => '#mautic_email_index',
+                    'mauticContent' => 'email',
+                    'route'         => $this->generateUrl('mautic_email_index', ['page' => $page]),
+                ],
+            ]
+        );
+    }
+
+    /**
+     * Loads a specific form into the detailed panel.
+     */
+    public function viewAction(Request $request, EmailModel $model, EmailConfig $emailConfig, AbTestSettingsService $abTestSettingsService, AbTestResultService $abTestResultService, $objectId): Response
+    {
+        $security = $this->security;
+
+        /** @var Email $email */
+        $email   = $model->getEntity($objectId);
+        $session = $request->getSession();
+        // set the page we came from
+        $page = $session->get('mautic.email.page', 1);
+
+        // Init the date range filter form
+        $dateRangeValues = $request->query->all()['daterange'] ?? $request->request->all()['daterange'] ?? [];
+        $action          = $this->generateUrl('mautic_email_action', ['objectAction' => 'view', 'objectId' => $objectId]);
+        $dateRangeForm   = $this->formFactory->create(DateRangeType::class, $dateRangeValues, ['action' => $action]);
+
+        if (null === $email) {
+            // set the return URL
+            $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $page]);
+
+            return $this->postActionRedirect(
+                [
+                    'returnUrl'       => $returnUrl,
+                    'viewParameters'  => ['page' => $page],
+                    'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::indexAction',
+                    'passthroughVars' => [
+                        'activeLink'    => '#mautic_email_index',
+                        'mauticContent' => 'email',
+                    ],
+                    'flashes' => [
+                        [
+                            'type'    => 'error',
+                            'msg'     => 'mautic.email.error.notfound',
+                            'msgVars' => ['%id%' => $objectId],
+                        ],
+                    ],
+                ]
+            );
+        }
+        if (!$this->security->hasEntityAccess(
+            'email:emails:viewown',
+            'email:emails:viewother',
+            $email->getCreatedBy()
+        )
+        ) {
+            $this->throwAccessDenied();
+        }
+
+        // get A/B test information
+        [$parent, $children] = $email->getVariants();
+
+        $abTestResults = [];
+        $criteria      = $model->getBuilderComponents($email, 'abTestWinnerCriteria');
+
+        $abTestSettings = null;
+        if (count($children) > 0) {
+            $abTestSettings = $abTestSettingsService->getAbTestSettings($parent);
+            $abTestResults  = $abTestResultService->getAbTestResult($parent, $criteria['criteria'][$abTestSettings['winnerCriteria']] ?? []);
+        }
+
+        // get related translations
+        [$translationParent, $translationChildren] = $email->getTranslations();
+        $logs = $this->auditLogModel->getLogForObject('email', $email->getId(), $email->getDateAdded());
+
+        if (!$session->has('mautic.email.clicks.orderby')) {
+            $session->set('mautic.email.clicks.orderby', 'r.url');
+            $session->set('mautic.email.clicks.orderbydir', 'DESC');
+        }
+        $this->setListFilters('email.clicks');
+
+        $clickCountsBaseUrl = $this->generateUrl(
+            'mautic_email_action',
+            [
+                'objectAction' => 'view',
+                'objectId'     => $email->getId(),
+            ]
+        );
+        $clickCountsSorting = [
+            'sessionVar' => 'email.clicks',
+            'orderBy'    => 't.hits',
+            'target'     => '#clicks-container',
+            'tmpl'       => 'click_counts',
+            'baseUrl'    => $clickCountsBaseUrl,
+        ];
+
+        // Get click through stats
+        $trackableLinks = $model->getEmailClickStats(
+            $email->getId(),
+            $session->get('mautic.email.clicks.orderby', 'r.url'),
+            $session->get('mautic.email.clicks.orderbydir', 'DESC')
+        );
+
+        if ('click_counts' === $request->get('tmpl')) {
+            $view = [
+                'viewParameters' => [
+                    'trackables'          => $trackableLinks,
+                    'entity'              => $email,
+                    'channel'             => 'email',
+                    'clickCountsSortable' => true,
+                    'clickCountsSorting'  => $clickCountsSorting,
+                    'tmpl'                => 'click_counts',
+                ],
+                'contentTemplate' => '@MauticPage/Trackable/click_counts.html.twig',
+                'passthroughVars' => [
+                    'activeLink'    => '#mautic_email_index',
+                    'mauticContent' => 'email',
+                    'route'         => $clickCountsBaseUrl,
+                ],
+            ];
+        } else {
+            $draftPreviewUrl = null;
+            if ($emailConfig->isDraftEnabled() && $email->hasDraft()) {
+                $draftPreviewUrl = $this->generateUrl(
+                    'mautic_email_preview',
+                    [
+                        'objectId'   => $email->getId(),
+                        'objectType' => 'draft',
+                    ]
+                );
+            }
+
+            $variants = [
+                'parent'                     => $parent,
+                'children'                   => $children,
+                'properties'                 => $abTestSettings ? $abTestSettings['variants'] : null,
+                'criteria'                   => $criteria['criteria'],
+                'winnerCriteria'             => $abTestSettings ? $abTestSettings['winnerCriteria'] : null,
+                'configurationError'         => $abTestSettings ? $abTestSettings['configurationError'] : null,
+                'hoursLeftToDetermineWinner' => $parent ? $model->timeLeftToDetermineWinner(
+                    $parent->getId(),
+                    $abTestSettings['sendWinnerDelay'] ?? null
+                ) : null,
+                'abTestSettings'             => $abTestSettings ?? [],
+            ];
+
+            $translations = [
+                'parent'   => $translationParent,
+                'children' => $translationChildren,
+            ];
+
+            $view = [
+                'returnUrl' => $this->generateUrl(
+                    'mautic_email_action',
+                    [
+                        'objectAction' => 'view',
+                        'objectId'     => $email->getId(),
+                    ]
+                ),
+                'viewParameters' => [
+                    'email'              => $email,
+                    'trackables'         => $trackableLinks,
+                    'logs'               => $logs,
+                    'isEmbedded'         => $request->get('isEmbedded') ?: false,
+                    'clickCountsSorting' => $clickCountsSorting,
+                    'variants'           => $variants,
+                    'translations'       => $translations,
+                    'permissions'        => $security->isGranted(
+                        [
+                            'email:emails:viewown',
+                            'email:emails:viewother',
+                            'email:emails:create',
+                            'email:emails:editown',
+                            'email:emails:editother',
+                            'email:emails:deleteown',
+                            'email:emails:deleteother',
+                            'email:emails:publishown',
+                            'email:emails:publishother',
+                            'lead:lists:viewown',
+                            'lead:lists:viewother',
+                        ],
+                        'RETURN_ARRAY'
+                    ),
+                    'abTestResults'   => $abTestResults,
+                    'security'        => $security,
+                    'draftPreviewUrl' => $draftPreviewUrl,
+                    'previewUrl'      => $this->generateUrl(
+                        'mautic_email_preview',
+                        ['objectId' => $email->getId()],
+                        UrlGeneratorInterface::ABSOLUTE_URL
+                    ),
+                    'contacts' => $this->forward(
+                        'Mautic\EmailBundle\Controller\EmailController::contactsAction',
+                        [
+                            'objectId'   => $email->getId(),
+                            'page'       => $request->getSession()->get('mautic.email.contact.page', 1),
+                            'ignoreAjax' => true,
+                        ]
+                    )->getContent(),
+                    'dateRangeForm'       => $dateRangeForm->createView(),
+                    'previewSettingsForm' => $this->createForm(
+                        ContentPreviewSettingsType::class,
+                        null,
+                        [
+                            'type'         => ContentPreviewSettingsType::TYPE_EMAIL,
+                            'objectId'     => $email->getId(),
+                            'variants'     => $variants,
+                            'translations' => $translations,
+                        ]
+                    )->createView(),
+                ],
+                'contentTemplate' => '@MauticEmail/Email/details.html.twig',
+                'passthroughVars' => [
+                    'activeLink'    => '#mautic_email_index',
+                    'mauticContent' => 'email',
+                ],
+            ];
+        }
+
+        return $this->delegateView($view);
+    }
+
+    /**
+     * Generates new form and processes post data.
+     *
+     * @param Email $entity
+     */
+    public function newAction(
+        Request $request,
+        AssetModel $assetModel,
+        CorePermissions $corePermissions,
+        EmailConfig $emailConfig,
+        EmailModel $model,
+        ThemeHelper $themeHelper,
+        $entity = null,
+    ): Response {
+        if (!$entity instanceof Email) {
+            $entity = $model->getEntity();
+        }
+
+        $method  = $request->getMethod();
+        $session = $request->getSession();
+
+        if (!$this->security->isGranted('email:emails:create')) {
+            $this->throwAccessDenied();
+        }
+
+        // set the page we came from
+        $page         = $session->get('mautic.email.page', 1);
+        $action       = $this->generateUrl('mautic_email_action', ['objectAction' => 'new']);
+        $emailForm    = $request->request->all()['emailform'] ?? [];
+        $updateSelect = 'POST' === $method
+            ? ($emailForm['updateSelect'] ?? false)
+            : $request->get('updateSelect', false);
+
+        if ($updateSelect) {
+            // Force type to template
+            $entity->setEmailType('template');
+        }
+
+        // create the form
+        $form = $model->createForm($entity, $this->formFactory, $action, ['update_select' => $updateSelect]);
+
+        // /Check for a submitted form and process it
+        if ('POST' === $method) {
+            $valid = false;
+
+            if (!$cancelled = $this->isFormCancelled($form)) {
+                if ($valid = $this->isFormValid($form)) {
+                    $content = $entity->getCustomHtml();
+
+                    $entity->setCustomHtml($content);
+
+                    $this->unpublishIfLackingPermission($entity, $corePermissions);
+
+                    try {
+                        // form is valid so process the data
+                        $model->saveEntity($entity);
+
+                        $this->addFlashMessage(
+                            'mautic.core.notice.created',
+                            [
+                                '%name%'      => $entity->getName(),
+                                '%menu_link%' => 'mautic_email_index',
+                                '%url%'       => $this->generateUrl(
+                                    'mautic_email_action',
+                                    [
+                                        'objectAction' => 'edit',
+                                        'objectId'     => $entity->getId(),
+                                    ]
+                                ),
+                            ]
+                        );
+
+                        if ($this->getFormButton($form, ['buttons', 'save'])->isClicked()) {
+                            $viewParameters = [
+                                'objectAction' => 'view',
+                                'objectId'     => $entity->getId(),
+                            ];
+                            $returnUrl = $this->generateUrl('mautic_email_action', $viewParameters);
+                            $template  = 'Mautic\EmailBundle\Controller\EmailController::viewAction';
+                        } else {
+                            // return edit view so that all the session stuff is loaded
+                            return $this->editAction($request, $assetModel, $corePermissions, $emailConfig, $model, $themeHelper, $entity->getId(), true);
+                        }
+                    } catch (InvalidRenderedHtmlException $e) {
+                        $valid                  = false;
+                        $this->invalidHtmlError = true;
+                        $this->addFlashMessage($e->getMessage(), [], 'error');
+                    }
+                }
+            } else {
+                $viewParameters = ['page' => $page];
+                $returnUrl      = $this->generateUrl('mautic_email_index', $viewParameters);
+                $template       = 'Mautic\EmailBundle\Controller\EmailController::indexAction';
+                // clear any modified content
+                $session->remove('mautic.emailbuilder.'.$entity->getSessionId().'.content');
+            }
+
+            $passthrough = [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'email',
+            ];
+
+            // Check to see if this is a popup
+            if (isset($form['updateSelect'])) {
+                $template    = false;
+                $passthrough = array_merge(
+                    $passthrough,
+                    [
+                        'updateSelect' => $form['updateSelect']->getData(),
+                        'id'           => $entity->getId(),
+                        'name'         => $entity->getName(),
+                        'optionLabel'  => sprintf('%s (%s)', $entity->getName(), $entity->getId()),
+                        'group'        => $entity->getLanguage(),
+                    ]
+                );
+            }
+
+            if ($cancelled || ($valid && $this->getFormButton($form, ['buttons', 'save'])->isClicked())) {
+                return $this->postActionRedirect(
+                    [
+                        'returnUrl'       => $returnUrl,
+                        'viewParameters'  => $viewParameters,
+                        'contentTemplate' => $template,
+                        'passthroughVars' => $passthrough,
+                    ]
+                );
+            }
+        }
+
+        $routeParams = [
+            'objectAction' => 'new',
+        ];
+        if ($updateSelect) {
+            $routeParams['updateSelect'] = $updateSelect;
+            $routeParams['contentOnly']  = 1;
+        }
+
+        // set some permissions
+        $permissions = $this->security->isGranted(
+            [
+                'page:preference_center:viewown',
+                'page:preference_center:viewother',
+            ],
+            'RETURN_ARRAY'
+        );
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'form'              => $form->createView(),
+                    'isVariant'         => $entity->isVariant(true),
+                    'email'             => $entity,
+                    'themes'            => $themeHelper->getInstalledThemes('email', true),
+                    'updateSelect'      => $updateSelect,
+                    'permissions'       => $permissions,
+                    'invalidHtmlError'  => $this->invalidHtmlError,
+                ],
+                'contentTemplate' => '@MauticEmail/Email/form.html.twig',
+                'passthroughVars' => [
+                    'activeLink'      => '#mautic_email_index',
+                    'mauticContent'   => 'email',
+                    'updateSelect'    => $updateSelect,
+                    'route'           => $this->generateUrl('mautic_email_action', $routeParams),
+                    'validationError' => $this->getFormErrorForBuilder($form),
+                ],
+            ]
+        );
+    }
+
+    /**
+     * @param bool $ignorePost
+     * @param bool $forceTypeSelection
+     */
+    public function editAction(
+        Request $request,
+        AssetModel $assetModel,
+        CorePermissions $corePermissions,
+        EmailConfig $emailConfig,
+        EmailModel $model,
+        ThemeHelper $themeHelper,
+        $objectId,
+        $ignorePost = false,
+        $forceTypeSelection = false,
+    ): Response {
+        $method  = $request->getMethod();
+        $entity  = $model->getEntity($objectId);
+        $session = $request->getSession();
+        $page    = $request->getSession()->get('mautic.email.page', 1);
+
+        // set the return URL
+        $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $page]);
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'email',
+            ],
+        ];
+
+        // not found
+        if (null === $entity) {
+            return $this->postActionRedirect(
+                array_merge(
+                    $postActionVars,
+                    [
+                        'flashes' => [
+                            [
+                                'type'    => 'error',
+                                'msg'     => 'mautic.email.error.notfound',
+                                'msgVars' => ['%id%' => $objectId],
+                            ],
+                        ],
+                    ]
+                )
+            );
+        }
+        if (!$this->security->hasEntityAccess(
+            'email:emails:editown',
+            'email:emails:editother',
+            $entity->getCreatedBy()
+        )
+        ) {
+            $this->throwAccessDenied();
+        } elseif ($model->isLocked($entity)) {
+            // deny access if the entity is locked
+            return $this->isLocked($postActionVars, $entity, 'email');
+        }
+
+        // Create the form
+        $action       = $this->generateUrl('mautic_email_action', ['objectAction' => 'edit', 'objectId' => $objectId]);
+        $emailform    = $request->request->all()['emailform'] ?? [];
+        $updateSelect = 'POST' === $method
+            ? ($emailform['updateSelect'] ?? false)
+            : $request->get('updateSelect', false);
+
+        if ($updateSelect) {
+            // Force type to template
+            $entity->setEmailType('template');
+        }
+        $form = $model->createForm($entity, $this->formFactory, $action, ['update_select' => $updateSelect]);
+        $this->setOptimisticLockVersion($entity, $form);
+
+        // /Check for a submitted form and process it
+        if (!$ignorePost && 'POST' === $method) {
+            $valid = false;
+            if (!$cancelled = $this->isFormCancelled($form)) {
+                $existingEmail = clone $entity;
+                $this->restoreNullifiedFieldsDuringClone($existingEmail, $entity);
+                if ($valid = ($this->isFormValid($form) && $this->checkOptimisticLockVersion($entity, $form, false))) {
+                    $content = $entity->getCustomHtml();
+                    $entity->setCustomHtml($content);
+
+                    $this->unpublishIfLackingPermission($entity, $corePermissions);
+
+                    // form is valid so process the data
+                    try {
+                        $model->saveEntity($entity, $this->getFormButton($form, ['buttons', 'save'])->isClicked());
+
+                        if ($emailConfig->isDraftEnabled() && !empty($entity->getId())) {
+                            $this->dispatcher->dispatch(new EmailEditSubmitEvent(
+                                $existingEmail,
+                                $entity,
+                                $this->getFormButton($form, ['buttons', 'save'])->isClicked(),
+                                $this->getFormButton($form, ['buttons', 'apply'])->isClicked(),
+                                $form->get('buttons')->has('save_draft') && $this->getFormButton($form, ['buttons', 'save_draft'])->isClicked(),
+                                $form->get('buttons')->has('apply_draft') && $this->getFormButton($form, ['buttons', 'apply_draft'])->isClicked(),
+                                $form->get('buttons')->has('discard_draft') && $this->getFormButton($form, ['buttons', 'discard_draft'])->isClicked()
+                            ), EmailEvents::ON_EMAIL_EDIT_SUBMIT);
+                        }
+
+                        $this->addFlashMessage(
+                            'mautic.core.notice.updated',
+                            [
+                                '%name%'      => $entity->getName(),
+                                '%menu_link%' => 'mautic_email_index',
+                                '%url%'       => $this->generateUrl(
+                                    'mautic_email_action',
+                                    [
+                                        'objectAction' => 'edit',
+                                        'objectId'     => $entity->getId(),
+                                    ]
+                                ),
+                            ]
+                        );
+                    } catch (InvalidRenderedHtmlException $e) {
+                        $valid                  = false;
+                        $this->invalidHtmlError = true;
+                        $this->addFlashMessage($e->getMessage(), [], 'error');
+                    }
+                }
+            } else {
+                // clear any modified content
+                $session->remove('mautic.emailbuilder.'.$objectId.'.content');
+                // unlock the entity
+                $model->unlockEntity($entity);
+            }
+
+            $template    = 'Mautic\EmailBundle\Controller\EmailController::viewAction';
+            $passthrough = [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'email',
+            ];
+
+            // Check to see if this is a popup
+            if (isset($form['updateSelect'])) {
+                $template    = false;
+                $passthrough = array_merge(
+                    $passthrough,
+                    [
+                        'updateSelect' => $form['updateSelect']->getData(),
+                        'id'           => $entity->getId(),
+                        'name'         => $entity->getName(),
+                        'optionLabel'  => sprintf('%s (%s)', $entity->getName(), $entity->getId()),
+                        'group'        => $entity->getLanguage(),
+                    ]
+                );
+            }
+
+            if ($cancelled
+                || ($valid && ($this->getFormButton($form, ['buttons', 'save'])->isClicked()
+                    || ($form->get('buttons')->has('save_draft') && $this->getFormButton($form, ['buttons', 'save_draft'])->isClicked())
+                    || ($form->get('buttons')->has('apply_draft') && $this->getFormButton($form, ['buttons', 'apply_draft'])->isClicked())
+                    || ($form->get('buttons')->has('discard_draft') && $this->getFormButton($form, ['buttons', 'discard_draft'])->isClicked())))
+            ) {
+                $viewParameters = [
+                    'objectAction' => 'view',
+                    'objectId'     => $entity->getId(),
+                ];
+
+                return $this->postActionRedirect(
+                    array_merge(
+                        $postActionVars,
+                        [
+                            'returnUrl'       => $this->generateUrl('mautic_email_action', $viewParameters),
+                            'viewParameters'  => $viewParameters,
+                            'contentTemplate' => $template,
+                            'passthroughVars' => $passthrough,
+                        ]
+                    )
+                );
+            }
+            if ($valid) {
+                // Rebuild the form in the case apply is clicked so that DEC content is properly populated if all were removed
+                $form = $model->createForm($entity, $this->formFactory, $action, ['update_select' => $updateSelect]);
+                $this->setOptimisticLockVersion($entity, $form);
+            }
+        } else {
+            // lock the entity
+            $model->lockEntity($entity);
+
+            // clear any modified content
+            $session->remove('mautic.emailbuilder.'.$objectId.'.content');
+
+            // Set to view content
+            $template = $entity->getTemplate();
+            if (empty($template)) {
+                $content = $entity->getCustomHtml();
+                $form['customHtml']->setData($content);
+            }
+        }
+
+        $assets         = $form['assetAttachments']->getData();
+        $attachmentSize = $assetModel->getTotalFilesize($assets);
+
+        $routeParams = [
+            'objectAction' => 'edit',
+            'objectId'     => $entity->getId(),
+        ];
+        if ($updateSelect) {
+            $routeParams['updateSelect'] = $updateSelect;
+            $routeParams['contentOnly']  = 1;
+        }
+
+        // set some permissions
+        $permissions = $this->security->isGranted(
+            [
+                'page:preference_center:viewown',
+                'page:preference_center:viewother',
+            ],
+            'RETURN_ARRAY'
+        );
+        $draftPreviewUrl = '';
+        if ($emailConfig->isDraftEnabled() && $entity->hasDraft()) {
+            $draftPreviewUrl = $this->generateUrl(
+                'mautic_email_preview',
+                ['objectId'       => $entity->getId(),
+                    'objectType'  => 'draft',
+                ]
+            );
+        }
+
+        $route = $this->generateUrl('mautic_email_action', $routeParams);
+        $error = $this->getFormErrorForBuilder($form);
+        $data  = ['version' => $error ? $form['version']->getData() : $entity->getVersion()];
+
+        if ($optimizedResponse = $this->returnOptimizedResponse($request, $form, '#mautic_email_index', 'email', $route, $data)) {
+            return $optimizedResponse;
+        }
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'form'               => $form->createView(),
+                    'isVariant'          => $entity->isVariant(true),
+                    'themes'             => $themeHelper->getInstalledThemes('email', true),
+                    'email'              => $entity,
+                    'forceTypeSelection' => $forceTypeSelection,
+                    'attachmentSize'     => $attachmentSize,
+                    'permissions'        => $permissions,
+                    'draftPreviewUrl'    => $draftPreviewUrl,
+                    'invalidHtmlError'   => $this->invalidHtmlError,
+                    'previewUrl'         => $this->generateUrl(
+                        'mautic_email_preview',
+                        ['objectId' => $entity->getId()],
+                        UrlGeneratorInterface::ABSOLUTE_URL
+                    ),
+                ],
+                'contentTemplate' => '@MauticEmail/Email/form.html.twig',
+                'passthroughVars' => [
+                    'activeLink'      => '#mautic_email_index',
+                    'mauticContent'   => 'email',
+                    'updateSelect'    => InputHelper::clean($request->query->get('updateSelect')),
+                    'route'           => $this->generateUrl('mautic_email_action', $routeParams),
+                    'validationError' => $error,
+                ],
+            ]
+        );
+    }
+
+    /**
+     * Clone an entity.
+     */
+    public function cloneAction(Request $request, EmailModel $model, ThemeHelper $themeHelper, $objectId): Response
+    {
+        $emailEntity  = $model->getEntity($objectId);
+        $entity       = null;
+        if ($emailEntity) {
+            $entity       = clone $emailEntity;
+        }
+        $method  = $request->getMethod();
+        $session = $request->getSession();
+        $page    = $session->get('mautic.email.page', 1);
+
+        $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $page]);
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::viewAction',
+            'passthroughVars' => [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'email',
+            ],
+        ];
+
+        // not found
+        if (null === $entity) {
+            return $this->postActionRedirect(
+                array_merge(
+                    $postActionVars,
+                    [
+                        'flashes' => [
+                            [
+                                'type'    => 'error',
+                                'msg'     => 'mautic.email.error.notfound',
+                                'msgVars' => ['%id%' => $objectId],
+                            ],
+                        ],
+                    ]
+                )
+            );
+        }
+        if (!$this->security->isGranted('email:emails:create')
+            || !$this->security->hasEntityAccess(
+                'email:emails:viewown',
+                'email:emails:viewother',
+                $emailEntity->getCreatedBy()
+            )
+        ) {
+            $this->throwAccessDenied();
+        } elseif ($model->isLocked($entity)) {
+            // deny access if the entity is locked
+            return $this->isLocked($postActionVars, $entity, 'email');
+        }
+
+        // Create the form
+        $action = $this->generateUrl('mautic_email_action', ['objectAction' => 'clone', 'objectId' => $objectId]);
+        $form   = $model->createForm($entity, $this->formFactory, $action);
+
+        // /Check for a submitted form and process it
+        if ('POST' === $method) {
+            $valid = false;
+            if (!$cancelled = $this->isFormCancelled($form)) {
+                if ($valid = $this->isFormValid($form)) {
+                    $content = $entity->getCustomHtml();
+                    $entity->setCustomHtml($content);
+
+                    try {
+                        // form is valid so process the data
+                        $model->saveEntity($entity);
+
+                        $this->addFlashMessage(
+                            'mautic.core.notice.created',
+                            [
+                                '%name%'      => $entity->getName(),
+                                '%menu_link%' => 'mautic_email_index',
+                                '%url%'       => $this->generateUrl(
+                                    'mautic_email_action',
+                                    [
+                                        'objectAction' => 'edit',
+                                        'objectId'     => $entity->getId(),
+                                    ]
+                                ),
+                            ],
+                            'warning'
+                        );
+                        if ($this->getFormButton($form, ['buttons', 'save'])->isClicked()) {
+                            $viewParameters = [
+                                'objectAction' => 'view',
+                                'objectId'     => $entity->getId(),
+                            ];
+                            $returnUrl = $this->generateUrl('mautic_email_action', $viewParameters);
+                            $template  = 'Mautic\EmailBundle\Controller\EmailController::viewAction';
+                        } else {
+                            return $this->forward(self::class.'::editAction', [
+                                'objectId'   => $entity->getId(),
+                                'ignorePost' => true,
+                            ]);
+                        }
+                    } catch (InvalidRenderedHtmlException $e) {
+                        $valid                  = false;
+                        $this->invalidHtmlError = true;
+                        $this->addFlashMessage($e->getMessage(), [], 'error');
+                    }
+                }
+            } else {
+                $viewParameters = ['page' => $page];
+                $returnUrl      = $this->generateUrl('mautic_email_index', $viewParameters);
+                $template       = 'Mautic\EmailBundle\Controller\EmailController::indexAction';
+                // clear any modified content
+                $session->remove('mautic.emailbuilder.'.$entity->getSessionId().'.content');
+            }
+
+            $passthrough = [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'email',
+            ];
+
+            if ($cancelled || ($valid && $this->getFormButton($form, ['buttons', 'save'])->isClicked())) {
+                return $this->postActionRedirect(
+                    [
+                        'returnUrl'       => $returnUrl,
+                        'viewParameters'  => $viewParameters,
+                        'contentTemplate' => $template,
+                        'passthroughVars' => $passthrough,
+                    ]
+                );
+            }
+        }
+
+        // set some permissions
+        $permissions = $this->security->isGranted(
+            [
+                'page:preference_center:viewown',
+                'page:preference_center:viewother',
+            ],
+            'RETURN_ARRAY'
+        );
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'form'              => $form->createView(),
+                    'isVariant'         => $entity->isVariant(true),
+                    'email'             => $entity,
+                    'themes'            => $themeHelper->getInstalledThemes('email', true),
+                    'permissions'       => $permissions,
+                    'invalidHtmlError'  => $this->invalidHtmlError,
+                ],
+                'contentTemplate' => '@MauticEmail/Email/form.html.twig',
+                'passthroughVars' => [
+                    'activeLink'      => '#mautic_email_index',
+                    'mauticContent'   => 'email',
+                    'route'           => $action,
+                    'validationError' => $this->getFormErrorForBuilder($form),
+                ],
+            ]
+        );
+    }
+
+    /**
+     * Clone an email and its translation/variant family.
+     */
+    public function cloneWithTranslationsAction(Request $request, EmailModel $model, int $objectId): JsonResponse|\Symfony\Component\HttpFoundation\RedirectResponse|Response
+    {
+        $page = $request->getSession()->get('mautic.email.page', 1);
+
+        $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $page]);
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'email',
+            ],
+        ];
+
+        if (Request::METHOD_POST !== $request->getMethod()) {
+            return $this->postActionRedirect($postActionVars);
+        }
+
+        $emailEntity = $model->getEntity($objectId);
+
+        if (null === $emailEntity) {
+            $postActionVars['flashes'][] = [
+                'type'    => 'error',
+                'msg'     => 'mautic.email.error.notfound',
+                'msgVars' => ['%id%' => $objectId],
+            ];
+
+            return $this->postActionRedirect($postActionVars);
+        }
+
+        if (!$this->security->isGranted('email:emails:create')
+            || !$this->security->hasEntityAccess(
+                'email:emails:viewown',
+                'email:emails:viewother',
+                $emailEntity->getCreatedBy()
+            )
+        ) {
+            $this->throwAccessDenied();
+        }
+
+        if ($model->isLocked($emailEntity)) {
+            return $this->isLocked($postActionVars, $emailEntity, 'email');
+        }
+
+        if ($emailEntity->isTranslation(true) || $emailEntity->isVariant(true)) {
+            $postActionVars['flashes'][] = [
+                'type' => 'error',
+                'msg'  => 'mautic.email.error.clone_with_relations_parent_only',
+            ];
+
+            return $this->postActionRedirect($postActionVars);
+        }
+
+        try {
+            $clonedEmails = $model->cloneEmailWithTranslationsAndVariants($emailEntity);
+            $clonedParent = $clonedEmails[0];
+
+            $postActionVars['flashes'] = [
+                [
+                    'type'    => 'notice',
+                    'msg'     => 'mautic.email.notice.cloned_with_relations',
+                    'msgVars' => [
+                        '%name%'  => $clonedParent->getName(),
+                        '%count%' => count($clonedEmails),
+                    ],
+                ],
+            ];
+
+            $postActionVars['viewParameters'] = [
+                'objectAction' => 'view',
+                'objectId'     => $clonedParent->getId(),
+            ];
+            $postActionVars['returnUrl'] = $this->generateUrl(
+                'mautic_email_action',
+                $postActionVars['viewParameters']
+            );
+            $postActionVars['contentTemplate'] = 'Mautic\EmailBundle\Controller\EmailController::viewAction';
+        } catch (InvalidRenderedHtmlException $e) {
+            $postActionVars['flashes'] = [
+                [
+                    'type' => 'error',
+                    'msg'  => $e->getMessage(),
+                ],
+            ];
+        }
+
+        return $this->postActionRedirect($postActionVars);
+    }
+
+    /**
+     * Deletes the entity.
+     */
+    public function deleteAction(Request $request, $objectId): Response
+    {
+        $page      = $request->getSession()->get('mautic.email.page', 1);
+        $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $page]);
+        $flashes   = [];
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'email',
+            ],
+        ];
+
+        if (Request::METHOD_POST === $request->getMethod()) {
+            $entity = $this->emailModel->getEntity($objectId);
+
+            if (null === $entity) {
+                $flashes[] = [
+                    'type'    => 'error',
+                    'msg'     => 'mautic.email.error.notfound',
+                    'msgVars' => ['%id%' => $objectId],
+                ];
+            } elseif (!$this->security->hasEntityAccess(
+                'email:emails:deleteown',
+                'email:emails:deleteother',
+                $entity->getCreatedBy()
+            )
+            ) {
+                $this->throwAccessDenied();
+            } elseif ($this->emailModel->isLocked($entity)) {
+                return $this->isLocked($postActionVars, $entity, 'email');
+            }
+
+            $this->emailModel->deleteEntity($entity);
+
+            $flashes[] = [
+                'type'    => 'notice',
+                'msg'     => 'mautic.core.notice.deleted',
+                'msgVars' => [
+                    '%name%' => $entity->getName(),
+                    '%id%'   => $objectId,
+                ],
+            ];
+        } // else don't do anything
+
+        return $this->postActionRedirect(
+            array_merge(
+                $postActionVars,
+                [
+                    'flashes' => $flashes,
+                ]
+            )
+        );
+    }
+
+    /**
+     * Activate the builder.
+     *
+     * @throws \Exception
+     * @throws \Mautic\CoreBundle\Exception\FileNotFoundException
+     */
+    public function builderAction(Request $request, ThemeHelper $themeHelper, $objectId): Response
+    {
+        // permission check
+        if (str_contains($objectId, 'new')) {
+            $isNew = true;
+            if (!$this->security->isGranted('email:emails:create')) {
+                $this->throwAccessDenied();
+            }
+            $entity = $this->emailModel->getEntity();
+            $entity->setSessionId($objectId);
+        } else {
+            $isNew  = false;
+            $entity = $this->emailModel->getEntity($objectId);
+            if (null == $entity
+                || !$this->security->hasEntityAccess(
+                    'email:emails:viewown',
+                    'email:emails:viewother',
+                    $entity->getCreatedBy()
+                )
+            ) {
+                $this->throwAccessDenied();
+            }
+        }
+
+        $template = InputHelper::clean($request->query->get('template'));
+
+        // merge any existing changes
+        $newContent = $request->getSession()->get('mautic.emailbuilder.'.$objectId.'.content', []);
+        $content    = $entity->getContent();
+
+        if (is_array($newContent)) {
+            $content = array_merge($content, $newContent);
+            // Update the content for processSlots
+            $entity->setContent($content);
+        }
+
+        $logicalName = $themeHelper->checkForTwigTemplate('@themes/'.$template.'/html/email.html.twig');
+
+        return new Response($themeHelper->renderThemeTemplate(
+            $logicalName,
+            [
+                'isNew'    => $isNew,
+                'content'  => $content,
+                'email'    => $entity,
+                'template' => $template,
+                'basePath' => $request->getBasePath(),
+            ]
+        ));
+    }
+
+    public function abTestAction(Request $request, AssetModel $assetModel, CorePermissions $corePermissions, EmailConfig $emailConfig, EmailModel $model, ThemeHelper $themeHelper, int $objectId): Response
+    {
+        $entity = $model->getEntity($objectId);
+
+        if (null != $entity) {
+            $parent = $entity->getVariantParent();
+
+            if ($parent || !$this->security->isGranted('email:emails:create')
+                || !$this->security->hasEntityAccess(
+                    'email:emails:viewown',
+                    'email:emails:viewother',
+                    $entity->getCreatedBy()
+                )
+            ) {
+                $this->throwAccessDenied();
+            }
+
+            // Note this since it's cleared on __clone()
+            $emailType = $entity->getEmailType();
+
+            $clone = clone $entity;
+
+            $clone->setIsPublished(false);
+            $clone->setEmailType($emailType);
+            $clone->setVariantParent($entity);
+        }
+
+        return $this->newAction($request, $assetModel, $corePermissions, $emailConfig, $model, $themeHelper, $clone);
+    }
+
+    /**
+     * Make the variant the main.
+     */
+    public function winnerAction(Request $request, $objectId): Response
+    {
+        // todo - add confirmation to button click
+        $page      = $request->getSession()->get('mautic.email', 1);
+        $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $page]);
+        $flashes   = [];
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'page',
+            ],
+        ];
+
+        if (Request::METHOD_POST === $request->getMethod()) {
+            $entity = $this->emailModel->getEntity($objectId);
+
+            if (null === $entity) {
+                $flashes[] = [
+                    'type'    => 'error',
+                    'msg'     => 'mautic.email.error.notfound',
+                    'msgVars' => ['%id%' => $objectId],
+                ];
+            } elseif (!$this->security->hasEntityAccess(
+                'email:emails:editown',
+                'email:emails:editother',
+                $entity->getCreatedBy()
+            )
+            ) {
+                $this->throwAccessDenied();
+            } elseif ($this->emailModel->isLocked($entity)) {
+                return $this->isLocked($postActionVars, $entity, 'email');
+            }
+
+            // setting parent here, as the parent will be removed by the code below.
+            $parent = $entity->getVariantParent() ?? $entity;
+            \assert($parent instanceof Email);
+
+            $this->emailModel->convertWinnerVariant($entity);
+
+            $this->dispatcher->dispatch(new ManualWinnerEvent($parent));
+
+            $flashes[] = [
+                'type'    => 'notice',
+                'msg'     => 'mautic.email.notice.activated',
+                'msgVars' => [
+                    '%name%' => $entity->getName(),
+                    '%id%'   => $objectId,
+                ],
+            ];
+
+            $postActionVars['viewParameters'] = [
+                'objectAction' => 'view',
+                'objectId'     => $objectId,
+            ];
+            $postActionVars['returnUrl']       = $this->generateUrl('mautic_page_action', $postActionVars['viewParameters']);
+            $postActionVars['contentTemplate'] = 'Mautic\EmailBundle\Controller\EmailController::viewAction';
+        } // else don't do anything
+
+        return $this->postActionRedirect(
+            array_merge(
+                $postActionVars,
+                [
+                    'flashes' => $flashes,
+                ]
+            )
+        );
+    }
+
+    /**
+     * Manually sends emails.
+     */
+    public function sendAction(Request $request, $objectId): Response|\Symfony\Component\HttpFoundation\RedirectResponse
+    {
+        $entity  = $this->emailModel->getEntity($objectId);
+        $session = $request->getSession();
+        $page    = $session->get('mautic.email.page', 1);
+
+        // set the return URL
+        $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $page]);
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => 'mautic_email_index',
+                'mauticContent' => 'email',
+            ],
+        ];
+
+        // not found
+        if (null === $entity) {
+            return $this->postActionRedirect(
+                array_merge(
+                    $postActionVars,
+                    [
+                        'flashes' => [
+                            [
+                                'type'    => 'error',
+                                'msg'     => 'mautic.email.error.notfound',
+                                'msgVars' => ['%id%' => $objectId],
+                            ],
+                        ],
+                    ]
+                )
+            );
+        }
+
+        if (!$entity->isPublished()) {
+            return $this->postActionRedirect(
+                array_merge(
+                    $postActionVars,
+                    [
+                        'flashes' => [
+                            [
+                                'type'    => 'error',
+                                'msg'     => 'mautic.email.error.send.unpublished',
+                                'msgVars' => [
+                                    '%id%'   => $objectId,
+                                    '%name%' => $entity->getName(),
+                                ],
+                            ],
+                        ],
+                    ]
+                )
+            );
+        }
+
+        if ('template' == $entity->getEmailType()
+            || !$this->security->hasEntityAccess(
+                'email:emails:viewown',
+                'email:emails:viewother',
+                $entity->getCreatedBy()
+            )
+        ) {
+            $this->throwAccessDenied();
+        }
+
+        // Check that the parent is getting sent
+        if ($variantParent = $entity->getVariantParent()) {
+            return $this->redirectToRoute('mautic_email_action', [
+                'objectAction' => 'send',
+                'objectId'     => $variantParent->getId(),
+            ]);
+        }
+
+        $translationParent = $entity->getTranslationParent();
+
+        if ($translationParent instanceof Email) {
+            return $this->redirectToRoute('mautic_email_action', [
+                'objectAction' => 'send',
+                'objectId'     => $translationParent->getId(),
+            ]);
+        }
+
+        $action   = $this->generateUrl('mautic_email_action', ['objectAction' => 'send', 'objectId' => $objectId]);
+        $pending  = $this->emailModel->getPendingLeads($entity, null, true);
+        $form     = $this->formFactory->create(BatchSendType::class, [], ['action' => $action]);
+        $complete = $request->request->get('complete', false);
+
+        if ('POST' === $request->getMethod() && ($complete || $this->isFormValid($form))) {
+            if (!$complete) {
+                $progress = [0, (int) $pending];
+                $session->set('mautic.email.send.progress', $progress);
+
+                $stats = ['sent' => 0, 'failed' => 0, 'failedRecipients' => []];
+                $session->set('mautic.email.send.stats', $stats);
+
+                $status     = 'inprogress';
+
+                $session->set('mautic.email.send.active', false);
+            } else {
+                $stats      = $session->get('mautic.email.send.stats');
+                $progress   = $session->get('mautic.email.send.progress');
+                $status     = (!empty($stats['failed'])) ? 'with_errors' : 'success';
+            }
+
+            $batchlimit      = $this->coreParametersHelper->get('mailer_memory_msg_limit');
+            $contentTemplate = '@MauticEmail/Send/progress.html.twig';
+            $viewParameters  = [
+                'progress'   => $progress,
+                'stats'      => $stats,
+                'status'     => $status,
+                'email'      => $entity,
+                'batchlimit' => $batchlimit,
+            ];
+        } else {
+            // process and send
+            $contentTemplate = '@MauticEmail/Send/form.html.twig';
+            $viewParameters  = [
+                'form'    => $form->createView(),
+                'email'   => $entity,
+                'pending' => $pending,
+            ];
+        }
+
+        return $this->delegateView(
+            [
+                'viewParameters'  => $viewParameters,
+                'contentTemplate' => $contentTemplate,
+                'passthroughVars' => [
+                    'mauticContent' => 'emailSend',
+                    'route'         => $action,
+                ],
+            ]
+        );
+    }
+
+    /**
+     * Deletes a group of entities.
+     */
+    public function batchDeleteAction(Request $request): Response
+    {
+        $page      = $request->getSession()->get('mautic.email.page', 1);
+        $returnUrl = $this->generateUrl('mautic_email_index', ['page' => $page]);
+        $flashes   = [];
+
+        $postActionVars = [
+            'returnUrl'       => $returnUrl,
+            'viewParameters'  => ['page' => $page],
+            'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::indexAction',
+            'passthroughVars' => [
+                'activeLink'    => '#mautic_email_index',
+                'mauticContent' => 'email',
+            ],
+        ];
+
+        if (Request::METHOD_POST === $request->getMethod()) {
+            $ids = json_decode($request->query->get('ids', '{}'));
+
+            $deleteIds = [];
+
+            // Loop over the IDs to perform access checks pre-delete
+            foreach ($ids as $objectId) {
+                $entity = $this->emailModel->getEntity($objectId);
+
+                if (null === $entity) {
+                    $flashes[] = [
+                        'type'    => 'error',
+                        'msg'     => 'mautic.email.error.notfound',
+                        'msgVars' => ['%id%' => $objectId],
+                    ];
+                } elseif (!$this->security->hasEntityAccess(
+                    'email:emails:viewown',
+                    'email:emails:viewother',
+                    $entity->getCreatedBy()
+                )
+                ) {
+                    $flashes[] = $this->getAccessDeniedFlash();
+                } elseif ($this->emailModel->isLocked($entity)) {
+                    $flashes[] = $this->isLocked($postActionVars, $entity, 'email', true);
+                } else {
+                    $deleteIds[] = $objectId;
+                }
+            }
+
+            // Delete everything we are able to
+            if ([] !== $deleteIds) {
+                $entities = $this->emailModel->deleteEntities($deleteIds);
+
+                $flashes[] = [
+                    'type'    => 'notice',
+                    'msg'     => 'mautic.email.notice.batch_deleted',
+                    'msgVars' => [
+                        '%count%' => count($entities),
+                    ],
+                ];
+            }
+        } // else don't do anything
+
+        return $this->postActionRedirect(
+            array_merge(
+                $postActionVars,
+                [
+                    'flashes' => $flashes,
+                ]
+            )
+        );
+    }
+
+    public function scheduleSendAction(CorePermissions $security, EmailModel $model, Request $request, int $objectId): JsonResponse|Response
+    {
+        $entity = $model->getEntity($objectId);
+
+        // not found or not allowed
+        if (null === $entity
+            || (!$security->hasEntityAccess(
+                'email:emails:viewown',
+                'email:emails:viewother',
+                $entity->getCreatedBy()
+            ))
+        ) {
+            return $this->postActionRedirect(
+                [
+                    'passthroughVars' => [
+                        'closeModal' => 1,
+                        'route'      => false,
+                    ],
+                ]
+            );
+        }
+
+        // Get the quick add form
+        $action = $this->generateUrl('mautic_email_action', ['objectAction' => 'scheduleSend', 'objectId' => $objectId]);
+
+        $data = [
+            'publishUp'       => $entity->getPublishUp(),
+            'publishDown'     => $entity->getPublishDown(),
+            'continueSending' => $entity->getContinueSending(),
+        ];
+
+        $form = $this->createForm(ScheduleSendType::class, $data, ['action' => $action]);
+
+        if ('POST' === $request->getMethod()) {
+            $isCancelled = $this->isFormCancelled($form);
+            $isValid     = $this->isFormValid($form);
+            if (!$isCancelled && $isValid) {
+                $data = $form->getData();
+                if ($form->get('buttons')->has('apply') && $this->getFormButton($form, ['buttons', 'apply'])->isClicked()) {
+                    $entity->setPublishUp(null);
+                    $entity->setPublishDown(null);
+                    $entity->setContinueSending(false);
+
+                    $this->addFlashMessage('mautic.email.notice.schedule.cancel');
+                } else {
+                    $entity->setPublishUp($data['publishUp']);
+                    $entity->setPublishDown($data['publishDown']);
+                    $entity->setContinueSending($data['continueSending'] ?? false);
+                    $entity->setIsPublished(true);
+
+                    $this->addFlashMessage('mautic.email.notice.schedule.sent');
+                }
+
+                $model->saveEntity($entity);
+            }
+
+            if ($isValid || $isCancelled) {
+                $viewParameters = [
+                    'objectAction' => 'view',
+                    'objectId'     => $objectId,
+                ];
+
+                return $this->postActionRedirect(
+                    [
+                        'returnUrl'       => $this->generateUrl('mautic_email_action', $viewParameters),
+                        'viewParameters'  => $viewParameters,
+                        'contentTemplate' => 'Mautic\EmailBundle\Controller\EmailController::viewAction',
+                        'passthroughVars' => [
+                            'mauticContent' => 'email',
+                            'closeModal'    => 1,
+                        ],
+                    ]
+                );
+            }
+        }
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'form' => $form->createView(),
+                ],
+                'contentTemplate' => '@MauticEmail/Email/schedule.html.twig',
+            ]
+        );
+    }
+
+    /**
+     * Generating the modal box content for
+     * the send multiple example email option.
+     */
+    public function sendExampleAction(Request $request, $objectId, CorePermissions $security, EmailModel $model, LeadModel $leadModel, FakeContactHelper $fakeLeadHelper): Response
+    {
+        $entity = $model->getEntity($objectId);
+
+        // not found or not allowed
+        if (null === $entity
+            || (!$this->security->hasEntityAccess(
+                'email:emails:viewown',
+                'email:emails:viewother',
+                $entity->getCreatedBy()
+            ))
+        ) {
+            return $this->postActionRedirect(
+                [
+                    'passthroughVars' => [
+                        'closeModal' => 1,
+                        'route'      => false,
+                    ],
+                ]
+            );
+        }
+
+        // Get the quick add form
+        $action = $this->generateUrl('mautic_email_action', ['objectAction' => 'sendExample', 'objectId' => $objectId]);
+        $user   = $this->user;
+
+        // We have to add prefix to example emails
+        $subject = sprintf('%s %s', self::EXAMPLE_EMAIL_SUBJECT_PREFIX, $entity->getSubject());
+        $entity->setSubject($subject);
+
+        $form = $this->createForm(ExampleSendType::class, ['emails' => ['list' => [$user->getEmail()]]], ['action' => $action]);
+
+        if ('POST' === $request->getMethod()) {
+            $isCancelled = $this->isFormCancelled($form);
+            $isValid     = $this->isFormValid($form);
+            if (!$isCancelled && $isValid) {
+                $emails              = $form['emails']->getData()['list'];
+                $previewForContactId = null;
+
+                // Use this contact data to fill email body content
+                if ($form->has('contact_id')) {
+                    $previewForContactId = (int) $form->getData()['contact_id'];
+                }
+
+                if ($previewForContactId
+                    && (!$security->isAdmin()
+                        || !$security->hasEntityAccess('lead:leads:viewown', 'lead:leads:viewother', $user->getId())
+                    )
+                ) {
+                    // disallow displaying contact information
+                    $previewForContactId = null;
+                }
+
+                if ($previewForContactId) {
+                    // We have one from request parameter
+                    $fields = $this->leadRepository->getLead($previewForContactId);
+                    $fields = $model->enrichedContactWithCompanies($fields);
+                }
+
+                if (!isset($fields)) {
+                    // Prepare a fake contact
+                    $fields = $fakeLeadHelper->prepareFakeContactWithPrimaryCompany();
+                }
+
+                $errors = [];
+                foreach ($emails as $email) {
+                    if (!empty($email)) {
+                        $users = [
+                            [
+                                // Setting the id, firstname and lastname to null as this is a unknown user
+                                'id'        => '',
+                                'firstname' => '',
+                                'lastname'  => '',
+                                'email'     => $email,
+                            ],
+                        ];
+
+                        // Send to current user
+                        $error = $model->sendSampleEmailToUser($entity, $users, $fields, [], [], false);
+                        if (count($error)) {
+                            $errors[] = $error[0];
+                        }
+                    }
+                }
+
+                if (0 !== count($errors)) {
+                    $this->addFlashMessage(implode('; ', $errors));
+                } else {
+                    $this->addFlashMessage('mautic.email.notice.test_sent_multiple.success');
+                }
+            }
+
+            if ($isValid || $isCancelled) {
+                return $this->postActionRedirect(
+                    [
+                        'passthroughVars' => [
+                            'closeModal' => 1,
+                            'route'      => false,
+                        ],
+                    ]
+                );
+            }
+        }
+
+        return $this->delegateView(
+            [
+                'viewParameters' => [
+                    'form' => $form->createView(),
+                ],
+                'contentTemplate' => '@MauticEmail/Email/recipients.html.twig',
+            ]
+        );
+    }
+
+    /**
+     * @param int $page
+     */
+    public function contactsAction(
+        Request $request,
+        PageHelperFactoryInterface $pageHelperFactory,
+        $objectId,
+        $page = 1,
+    ): Response {
+        $permissions = [
+            'lead:leads:viewown',
+            'lead:leads:viewother',
+            'email:emails:viewown',
+            'email:emails:viewother',
+        ];
+
+        return $this->generateContactsGrid(
+            $request,
+            $pageHelperFactory,
+            $objectId,
+            $page,
+            $permissions,
+            'email',
+            'email_stats',
+            'email',
+            'email_id'
+        );
+    }
+
+    public function getModelName(): string
+    {
+        return 'email';
+    }
+
+    protected function getDefaultOrderDirection(): string
+    {
+        return 'DESC';
+    }
+
+    private function restoreNullifiedFieldsDuringClone(Email $clonedEmail, Email $cloningEmail): void
+    {
+        $clonedEmail->setTranslationParent($cloningEmail->getTranslationParent());
+        foreach ($cloningEmail->getTranslationChildren() as $translationChild) {
+            $clonedEmail->addTranslationChild($translationChild);
+        }
+        $clonedEmail->setVariantParent($cloningEmail->getVariantParent());
+        foreach ($cloningEmail->getVariantChildren() as $variantChild) {
+            $clonedEmail->addVariantChild($variantChild);
+        }
+        $clonedEmail->setSentCount($cloningEmail->getSentCount());
+        $clonedEmail->setReadCount($cloningEmail->getReadCount());
+        $clonedEmail->setRevision($cloningEmail->getRevision());
+        $clonedEmail->setVariantSentCount($cloningEmail->getVariantSentCount());
+        $clonedEmail->setVariantReadCount($cloningEmail->getVariantReadCount());
+        $clonedEmail->setVariantStartDate($cloningEmail->getVariantStartDate());
+        $clonedEmail->setEmailType($cloningEmail->getEmailType());
+        $clonedEmail->setDraft($cloningEmail->getDraft());
+    }
+
+    private function unpublishIfLackingPermission(Email $entity, CorePermissions $corePermissions): Email
+    {
+        $canPublish = $corePermissions->hasPublishAccessForEntity(
+            $entity,
+            'email:emails:publishown',
+            'email:emails:publishother'
+        );
+        if ($entity->isNew() && !$canPublish) {
+            $entity->setIsPublished(false);
+        }
+
+        return $entity;
+    }
+}

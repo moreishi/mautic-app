@@ -1,0 +1,45 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\PluginBundle\Event;
+
+use Doctrine\ORM\Mapping\ClassMetadata;
+use Mautic\PluginBundle\Entity\Plugin;
+use Symfony\Contracts\EventDispatcher\Event;
+
+final class PluginInstallEvent extends Event
+{
+    /**
+     * @param array<class-string, ClassMetadata>|null $metadata
+     */
+    public function __construct(
+        private readonly Plugin $plugin,
+        private readonly ?array $metadata,
+        private readonly ?bool $installedSchema,
+    ) {
+    }
+
+    public function getPlugin(): Plugin
+    {
+        return $this->plugin;
+    }
+
+    /**
+     * @return array<class-string, ClassMetadata>|null
+     */
+    public function getMetadata(): ?array
+    {
+        return $this->metadata;
+    }
+
+    public function getInstalledSchema(): ?bool
+    {
+        return $this->installedSchema;
+    }
+
+    public function checkContext(string $pluginName): bool
+    {
+        return $pluginName === $this->plugin->getName();
+    }
+}

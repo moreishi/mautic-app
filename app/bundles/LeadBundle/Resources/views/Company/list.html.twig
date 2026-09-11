@@ -1,0 +1,203 @@
+{#
+  Variables
+    - searchValue
+    - leadCounts
+    - columns (alias => translated label from company list configuration)
+    - items
+    - page
+    - limit
+    - permissions
+    - tmpl
+    - totalItems
+#}
+{% set isIndex = 'index' == tmpl ? true : false %}
+{% set tmpl = 'list' %}
+{% extends isIndex ? '@MauticCore/Default/content.html.twig' : '@MauticCore/Default/raw_output.html.twig' %}
+
+{% block mauticContent %}company{% endblock %}
+
+{% block headerTitle %}{{ 'mautic.companies.menu.root'|trans }}{% endblock %}
+
+{% block content %}
+  {% if isIndex %}
+    <div id="page-list-wrapper" class="{% if items|length > 0 or searchValue is not empty %}panel {% endif %}panel-default">
+      {%- set pageButtons = [] %}
+      {%- set bulkActionsCustom = [] %}
+{% if permissions['lead:leads:create'] %}
+    {% set pageButtons = pageButtons|merge([
+        {
+            'attr': {
+                'href': path('mautic_import_action', {'object': 'companies', 'objectAction': 'new'}),
+            },
+            'iconClass': 'ri-import-line',
+            'btnText': 'mautic.lead.lead.import',
+        },
+        {
+            'attr': {
+                'href': path('mautic_import_index', {'object': 'companies'}),
+            },
+            'iconClass': 'ri-history-line',
+            'btnText': 'mautic.lead.lead.import.index',
+        }
+    ]) %}
+{% endif %}
+{% if permissions['lead:leads:editown'] or permissions['lead:leads:editother'] %}
+    {% set bulkActionsCustom = bulkActionsCustom|merge([
+        {
+            'attr': {
+                'class': 'btn btn-ghost btn-sm btn-nospin',
+                'data-toggle': 'ajaxmodal',
+                'data-target': '#MauticSharedModal',
+                'href': path('mautic_company_action', {'objectAction': 'batchOwners'}),
+                'data-header': 'mautic.lead.batch.owner'|trans,
+            },
+            'btnText': 'mautic.lead.batch.owner'|trans,
+            'iconClass': 'ri-user-line',
+        },
+        {
+            'attr': {
+                'class': 'btn btn-ghost btn-sm btn-nospin',
+                'data-toggle': 'ajaxmodal',
+                'data-target': '#MauticSharedModal',
+                'href': path('mautic_company_action', {'objectAction': 'batchFindReplace'}),
+                'data-header': 'mautic.core.find_replace'|trans,
+            },
+            'btnText': 'mautic.core.find_replace'|trans,
+            'iconClass': 'ri-find-replace-line',
+        },
+    ]) %}
+{% endif %}
+
+{{- include('@MauticCore/Helper/list_toolbar.html.twig', {
+    'searchValue': searchValue,
+    'searchHelp': 'mautic.company.help.searchcommands',
+    'action': currentRoute,
+    'page_actions': {
+        'templateButtons': {'new': permissions['lead:leads:create']},
+        'routeBase': 'company',
+        'customButtons': pageButtons,
+    },
+    'bulk_actions': {
+        'routeBase': 'company',
+        'templateButtons': {
+            'delete': permissions['lead:leads:deleteother']
+        },
+        'customButtons': bulkActionsCustom,
+    },
+    'quickFilters': [
+        {
+            'search': 'mautic.core.searchcommand.ismine',
+            'label': 'mautic.core.searchcommand.ismine.label',
+            'tooltip': 'mautic.core.searchcommand.ismine.description',
+            'icon': 'ri-user-line'
+        }
+    ],
+    'searchScopes': searchScopes|default([]),
+    'searchScopeHint': searchScopeHint|default(''),
+}) -}}
+    <div class="page-list">
+  {% endif %}
+
+  {% if items|length > 0 %}
+      <div class="table-responsive page-list">
+          <table class="table table-hover company-list" id="companyTable">
+              <thead>
+              <tr>
+                {{ include('@MauticCore/Helper/tableheader.html.twig', {
+                    'checkall': 'true',
+                    'target': '#companyTable',
+                }) }}
+                  {% for column, label in columns %}
+                      {{ include([('@MauticLead/Company/_list_header_'~column~'.html.twig'), '@MauticLead/Company/_list_header_default.html.twig'], {
+                          column: column,
+                          label: label,
+                      }) }}
+                  {% endfor %}
+              </tr>
+              </thead>
+              <tbody>
+              {% for item in items %}
+                  {% set fields = item.fields %}
+                  <tr>
+                      <td>
+                          {{ include('@MauticCore/Helper/list_actions.html.twig', {
+                                  'item': item,
+                                  'templateButtons': {
+                                      'edit': permissions['lead:leads:editother'],
+                                      'clone': permissions['lead:leads:create'],
+                                      'delete': permissions['lead:leads:deleteother'],
+                                  },
+                                  'routeBase': 'company',
+                          }) }}
+                      </td>
+                      {% for column, label in columns %}
+                          {{ include([('@MauticLead/Company/_list_column_'~column~'.html.twig'), '@MauticLead/Company/_list_column_default.html.twig'], {
+                              item: item,
+                              fields: fields,
+                              column: column,
+                              label: label,
+                              permissions: permissions,
+                              leadCounts: leadCounts,
+                          }) }}
+                      {% endfor %}
+                  </tr>
+              {% endfor %}
+              </tbody>
+          </table>
+      </div>
+      <div class="panel-footer">
+          {{ include('@MauticCore/Helper/pagination.html.twig', {
+                  'totalItems': totalItems,
+                  'page': page,
+                  'limit': limit,
+                  'menuLinkId': 'mautic_company_index',
+                  'baseUrl': path('mautic_company_index'),
+                  'sessionVar': 'company',
+          }) }}
+      </div>
+  {% else %}
+    {% if searchValue is not empty %}
+      {{ include('@MauticCore/Helper/noresults.html.twig') }}
+    {% else %}
+      <div class="mt-80 col-md-offset-2 col-lg-offset-3 col-md-8 col-lg-5 height-auto">
+        {% set childContainer %}
+          <div class="mb-32">
+              {% include '@MauticCore/Components/pictogram.html.twig' with {
+                  'pictogram': 'organization',
+                  'size': '80'
+              } %}
+          </div>
+          <div class="type-body-02">
+              {% include '@MauticCore/Components/list--styled.html.twig' with {
+                  'type': 'unordered',
+                  'style': 'checkmark',
+                  'items': [
+                      'mautic.company.empty.feature.segment_contacts',
+                      'mautic.company.empty.feature.custom_fields',
+                      'mautic.company.empty.feature.adjust_scores',
+                      'mautic.company.empty.feature.identify',
+                      'mautic.company.empty.feature.assign_contacts',
+                  ]
+              } %}
+          </div>
+        {% endset %}
+
+        {{ include('@MauticCore/Components/content-block.html.twig', {
+            heading: 'mautic.company.empty.heading',
+            subheading: 'mautic.company.empty.subheading',
+            childContainer: childContainer,
+            cta: permissions['lead:leads:create'] ? {
+                'label': 'mautic.company.action.add',
+                'link': path('mautic_import_action', {'object': 'companies', 'objectAction': 'new'}),
+                'attributes': {'data-toggle': 'ajax'}
+            } : null
+        }) }}
+      </div>
+    {% endif %}
+  {% endif %}
+
+  {% if isIndex %}
+        </div>
+    </div>
+  {% endif %}
+{% endblock %}

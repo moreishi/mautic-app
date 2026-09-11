@@ -1,0 +1,141 @@
+{% set isIndex = 'index' == tmpl ? true : false %}
+{% set tmpl = 'list' %}
+{% extends isIndex ? '@MauticCore/Default/content.html.twig' : '@MauticCore/Default/raw_output.html.twig' %}
+{% block mauticContent %}group{% endblock %}
+
+{% block headerTitle %}{{ 'mautic.point.group.header.index'|trans }}{% endblock %}
+
+{% block content %}
+    <div id="page-list-wrapper" class="{% if items|length > 0 or searchValue is not empty %}panel {% endif %}panel-default">
+        {{- include('@MauticCore/Helper/list_toolbar.html.twig', {
+            'searchValue': searchValue,
+            'searchScopes': searchScopes|default([]),
+            'searchScopeHint': searchScopeHint|default(null),
+            'action': currentRoute,
+            'page_actions': {
+                'templateButtons': {
+                    'new': permissions['point:groups:create']
+                },
+                'routeBase': 'point.group',
+                'langVar': 'point.group'
+            },
+            'bulk_actions': {
+                'langVar': 'point.group',
+                'routeBase': 'point.group',
+                'templateButtons': {
+                    'delete': permissions['point:groups:delete'],
+                },
+            },
+        }) -}}
+        <div class="page-list">
+            {% if items is defined and items is not empty %}
+                <div class="table-responsive">
+                    <table class="table table-hover" id="groupTable">
+                        <thead>
+                        <tr>
+                            {{ include('@MauticCore/Helper/tableheader.html.twig', {
+                                'checkall': 'true',
+                                'target': '#groupTable',
+                            }) }}
+                            {{ include(
+                                '@MauticCore/Helper/tableheader.html.twig',
+                                {
+                                    'sessionVar': 'point.group',
+                                    'orderBy'   : 'pl.name',
+                                    'text'      : 'mautic.core.name',
+                                    'class'     : 'col-group-name',
+                                    'default'   : true,
+                                }
+                            ) }}
+
+                            {{ include(
+                                '@MauticCore/Helper/tableheader.html.twig',
+                                {
+                                    'sessionVar' : 'point.group',
+                                    'orderBy'    : 'pl.id',
+                                    'text'       : 'mautic.core.id',
+                                    'class'      : 'visible-md visible-lg col-group-id',
+                                }
+                            ) }}
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {% for item in items %}
+                            <tr>
+                                <td>
+                                    {{- include('@MauticCore/Helper/list_actions.html.twig', {
+                                        item: item,
+                                        templateButtons: {
+                                            edit: permissions['point:groups:edit'],
+                                            delete: permissions['point:groups:delete'],
+                                        },
+                                        routeBase: 'point.group',
+                                        langVar: 'point.group',
+                                    }) -}}
+                                </td>
+                                <td>
+                                    <div>
+                                        {{- include(
+                                            '@MauticCore/Helper/publishstatus_icon.html.twig',
+                                            {
+                                                'item': item, 'model': 'point.group'
+                                            }
+                                        )}}
+
+                                        {% if permissions['point:groups:edit'] %}
+                                            <a href="{{ path('mautic_point.group_action', {
+                                                objectAction: 'edit',
+                                                objectId: item.getId()
+                                            }) }}" data-toggle="ajax">
+                                                {{ item.getName() }}
+                                            </a>
+                                        {% else %}
+                                            {{ item.getName() }}
+                                        {% endif %}
+                                    </div>
+                                    {% set description = item.getDescription() %}
+                                    {{ include('@MauticCore/Helper/description--inline.html.twig', {
+                                        'description': item.description
+                                    }) }}
+                                </td>
+                                <td class="visible-md visible-lg">{{ item.getId() }}</td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    <div class="panel-footer">
+                        {{- include('@MauticCore/Helper/pagination.html.twig', {
+                            'totalItems' : items|length,
+                            'page'       : page,
+                            'limit'      : limit,
+                            'baseUrl'    : path('mautic_point.group_index'),
+                            'sessionVar' : 'point.group',
+                        }) -}}
+                    </div>
+                </div>
+            {% else %}
+                {% if searchValue is not empty %}
+                    {{ include('@MauticCore/Helper/noresults.html.twig') }}
+                {% else %}
+                    <div class="mt-80 col-md-offset-2 col-lg-offset-3 col-md-8 col-lg-5 height-auto">
+                        {% set childContainer %}
+                            <div class="mb-md">
+                                {% include '@MauticCore/Components/pictogram.html.twig' with {
+                                    'pictogram': 'filter-and-group-data',
+                                    'size': '80'
+                                } %}
+                            </div>
+                        {% endset %}
+                
+                        {{ include('@MauticCore/Components/content-block.html.twig', {
+                            heading: 'mautic.point.group.onboarding.heading',
+                            subheading: 'mautic.point.group.onboarding.subheading',
+                            copy: 'mautic.point.group.onboarding.copy',
+                            childContainer: childContainer,
+                        }) }}
+                    </div>
+                {% endif %}
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

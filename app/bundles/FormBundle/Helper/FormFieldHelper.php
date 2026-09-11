@@ -1,0 +1,265 @@
+<?php
+
+namespace Mautic\FormBundle\Helper;
+
+use Mautic\CoreBundle\Helper\AbstractFormFieldHelper;
+use Mautic\CoreBundle\Helper\InputHelper;
+use Mautic\CoreBundle\Translation\Translator;
+use Mautic\FormBundle\Entity\Field;
+use Symfony\Component\Validator\Constraints\Blank;
+use Symfony\Component\Validator\Constraints\Email;
+use Symfony\Component\Validator\Constraints\EqualTo;
+use Symfony\Component\Validator\Constraints\NotBlank;
+use Symfony\Component\Validator\Constraints\Url;
+use Symfony\Component\Validator\ConstraintViolation;
+use Symfony\Component\Validator\ConstraintViolationList;
+use Symfony\Component\Validator\Validation;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
+
+class FormFieldHelper extends AbstractFormFieldHelper
+{
+    private readonly ValidatorInterface $validator;
+
+    private array $types = [
+        'captcha' => [
+            'constraints' => [
+                NotBlank::class => ['message' => 'mautic.form.submission.captcha.invalid'],
+
+                EqualTo::class => ['message' => 'mautic.form.submission.captcha.invalid'],
+
+                Blank::class => ['message' => 'mautic.form.submission.captcha.invalid'],
+            ],
+        ],
+        'checkboxgrp' => [
+            'filter' => 'raw',
+        ],
+        'country'     => [],
+        'date'        => [],
+        'datetime'    => [],
+        'email'       => [
+            'filter'      => 'email',
+            'constraints' => [
+                Email::class => ['message' => 'mautic.form.submission.email.invalid'],
+            ],
+        ],
+        'freetext'      => [],
+        'freehtml'      => [],
+        'hidden'        => [],
+        'companyLookup' => [],
+        'number'        => [
+            'filter' => 'float',
+        ],
+        'slider'        => [
+            'filter' => 'float',
+        ],
+        'pagebreak' => [],
+        'password'  => [],
+        'radiogrp'  => [
+            'filter' => 'raw',
+        ],
+        'select'    => [
+            'filter' => 'raw',
+        ],
+        'tel'       => [],
+        'text'      => [],
+        'rating'    => [],
+        'textarea'  => [],
+        'url'       => [
+            'filter'      => 'url',
+            'constraints' => [
+                Url::class => ['message' => 'mautic.form.submission.url.invalid'],
+            ],
+        ],
+        'file' => [],
+    ];
+
+    public function __construct(Translator $translator, ?ValidatorInterface $validator = null)
+    {
+        $this->translator = $translator;
+
+        if (null === $validator) {
+            $validator = Validation::createValidator();
+        }
+        $this->validator = $validator;
+
+        parent::__construct();
+    }
+
+    public function setTranslationKeyPrefix(): void
+    {
+        $this->translationKeyPrefix = 'mautic.form.field.type.';
+    }
+
+    public function getTypes(): array
+    {
+        return $this->types;
+    }
+
+    public function getFieldFilter(string $type): string
+    {
+        return $this->types[$type]['filter'] ?? 'string';
+    }
+
+    /**
+     * @param Field $f
+     */
+    public function validateFieldValue($type, $value, $f = null): array
+    {
+        $errors = [];
+        if (isset($this->types[$type]['constraints'])) {
+            foreach ($this->types[$type]['constraints'] as $constraint => $opts) {
+                // don't check empty values unless the constraint is NotBlank
+                if (NotBlank::class === $constraint && empty($value)) {
+                    continue;
+                }
+
+                if ('captcha' == $type) {
+                    $captcha = $f->getProperties()['captcha'];
+                    if (empty($captcha) && Blank::class !== $constraint) {
+                        // Used as a honeypot
+                        $captcha = '';
+                    } elseif (Blank::class === $constraint) {
+                        continue;
+                    }
+
+                    if (EqualTo::class == $constraint) {
+                        $opts['value'] = $captcha;
+                    }
+                }
+
+                /** @var ConstraintViolationList $violations */
+                $violations = $this->validator->validate($value, new $constraint($opts));
+
+                if (count($violations)) {
+                    /** @var ConstraintViolation $v */
+                    foreach ($violations as $v) {
+                        $transParameters = $v->getParameters();
+
+                        if (null !== $f) {
+                            $transParameters['%label%'] = '&quot;'.$f->getLabel().'&quot;';
+                        }
+
+                        $errors[] = $this->translator->trans($v->getMessage(), $transParameters, 'validators');
+                    }
+                }
+            }
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Search and replace the HTML of the form field with the value.
+     */
+    public function populateField($field, $value, $formName, &$formHtml): void
+    {
+        $alias = $field->getAlias();
+
+        $inputClosePattern = '(.*?)\/?>';
+        $escapedFormName   = preg_quote($formName, '/');
+        $escapedAlias      = preg_quote($alias, '/');
+
+        // Adds the "readonly" attribute to a field if it is configured as read-only with auto-fill enabled and a sanitized value exists.
+        $fieldAttributeReadOnly = fn ($field, $sanitizedValue): string => ($field->isAutoFillReadOnly() && $sanitizedValue) ? ' readonly ' : '';
+
+        switch ($field->getType()) {
+            case 'text':
+            case 'number':
+            case 'email':
+            case 'hidden':
+            case 'tel':
+            case 'url':
+            case 'date':
+            case 'datetime':
+                if ('tel' === $field->getType()) {
+                    $sanitizedValue = InputHelper::clean($value);
+                } else {
+                    $sanitizedValue = $this->sanitizeValue($value);
+                }
+                if (preg_match('/<input(.*?)value="(.*?)"(.*?)id="mauticform_input_'.$escapedFormName.'_'.$escapedAlias.'"'.$inputClosePattern.'/i', $formHtml, $match)) {
+                    $replace = '<input'.$match[1].'id="mauticform_input_'.$formName.'_'.$alias.'"'.$match[3].'value="'.$sanitizedValue.'"'
+                        .$match[4].$fieldAttributeReadOnly($field, $sanitizedValue).'/>';
+                    $formHtml = str_replace($match[0], $replace, $formHtml);
+                }
+                break;
+            case 'textarea':
+                if (preg_match('/<textarea(.*?)id="mauticform_input_'.$escapedFormName.'_'.$escapedAlias.'"(.*?)>(.*?)<\/textarea>/i', $formHtml, $match)) {
+                    $value    = $this->sanitizeValue($value);
+                    $replace  = '<textarea'.$match[1].'id="mauticform_input_'.$formName.'_'.$alias.'"'.$match[2].$fieldAttributeReadOnly($field, $value).'>'.$value.'</textarea>';
+                    $formHtml = str_replace($match[0], $replace, $formHtml);
+                }
+                break;
+            case 'checkboxgrp':
+                $isUrlEncoded = is_string($value) && str_contains($value, '%7C');
+                $separator    = $isUrlEncoded ? urlencode('|') : '|';
+                if (is_string($value) && strrpos($value, $separator) > 0) {
+                    $value = explode($separator, $value);
+                } elseif (!is_array($value)) {
+                    $value = [$value];
+                }
+
+                foreach ($value as $val) {
+                    $val          = $this->sanitizeValue($val);
+                    if (preg_match_all(
+                        '/<input(.*?)id="mauticform_checkboxgrp_checkbox_'.$escapedAlias.'(.*?)"(.*?)value="([^"]*)"'.$inputClosePattern.'/i',
+                        $formHtml,
+                        $matches,
+                        PREG_SET_ORDER
+                    )) {
+                        foreach ($matches as $match) {
+                            if ($match[4] === $val) {
+                                $replace = '<input'.$match[1].'id="mauticform_checkboxgrp_checkbox_'.$alias.$match[2].'"'.$match[3].'value="'.$val.'"'
+                                    .$match[5].' checked />';
+                                $formHtml = str_replace($match[0], $replace, $formHtml);
+                                break;
+                            }
+                        }
+                    }
+                }
+                break;
+            case 'radiogrp':
+            case 'rating':
+                $value        = $this->sanitizeValue($value);
+                if (preg_match_all('/<input(.*?)id="mauticform_radiogrp_radio_'.$escapedAlias.'(.*?)"(.*?)value="([^"]*)"'.$inputClosePattern.'/i', $formHtml, $matches, PREG_SET_ORDER)) {
+                    foreach ($matches as $match) {
+                        if ($match[4] === $value) {
+                            $replace = '<input'.$match[1].'id="mauticform_radiogrp_radio_'.$alias.$match[2].'"'.$match[3].'value="'.$value.'"'.$match[5]
+                                .' checked />';
+                            $formHtml = str_replace($match[0], $replace, $formHtml);
+                            break;
+                        }
+                    }
+                }
+                break;
+            case 'select':
+            case 'country':
+                $regex = '/<select\b(?=[^>]*\bid="mauticform_input_'.$escapedFormName.'_'.$escapedAlias.'")[^>]*>(.*?)<\/select>/is';
+                if (preg_match($regex, $formHtml, $match)) {
+                    $origText  = $match[0];
+                    $sanitized = $this->sanitizeValue($value);
+                    $replace   = preg_replace_callback(
+                        '/<option\s+value="([^"]*)"\s*>/i',
+                        static fn (array $optionMatch): string => $optionMatch[1] === $sanitized
+                            ? '<option value="'.$sanitized.'" selected="selected">'
+                            : $optionMatch[0],
+                        $origText
+                    ) ?? $origText;
+                    $formHtml = str_replace($origText, $replace, $formHtml);
+                }
+
+                break;
+        }
+    }
+
+    public function sanitizeValue(mixed $value): mixed
+    {
+        $valueType = gettype($value);
+        $value     = str_replace(['"', '>', '<'], ['&quot;', '&gt;', '&lt;'], strip_tags(rawurldecode($value)));
+        // for boolean expect 0 or 1
+        if ('boolean' === $valueType) {
+            return (int) $value;
+        }
+
+        return $value;
+    }
+}

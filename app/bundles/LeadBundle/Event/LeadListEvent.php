@@ -1,0 +1,42 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\LeadBundle\Event;
+
+use Mautic\CoreBundle\Event\CommonEvent;
+use Mautic\CoreBundle\Event\DependencyErrorEventInterface;
+use Mautic\CoreBundle\Event\DependencyErrorEventTrait;
+use Mautic\LeadBundle\Entity\LeadList;
+
+class LeadListEvent extends CommonEvent implements DependencyErrorEventInterface
+{
+    use DependencyErrorEventTrait;
+
+    /**
+     * @param bool $isNew
+     */
+    public function __construct(LeadList $list, $isNew = false)
+    {
+        $this->entity = $list;
+        $this->isNew  = $isNew;
+    }
+
+    /**
+     * Returns the List entity.
+     *
+     * @return LeadList
+     */
+    public function getList()
+    {
+        return $this->entity;
+    }
+
+    /**
+     * Sets the List entity.
+     */
+    public function setList(LeadList $list): void
+    {
+        $this->entity = $list;
+    }
+}

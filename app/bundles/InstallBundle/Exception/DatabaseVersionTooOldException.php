@@ -1,0 +1,22 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\InstallBundle\Exception;
+
+final class DatabaseVersionTooOldException extends \Exception
+{
+    public function __construct(
+        private readonly string $currentVersion,
+    ) {
+        parent::__construct();
+    }
+
+    /**
+     * Returns the current database version as reported by the database itself.
+     */
+    public function getCurrentVersion(): string
+    {
+        return $this->currentVersion;
+    }
+}

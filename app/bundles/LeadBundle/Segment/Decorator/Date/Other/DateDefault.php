@@ -1,0 +1,83 @@
+<?php
+
+namespace Mautic\LeadBundle\Segment\Decorator\Date\Other;
+
+use Doctrine\DBAL\Query\Expression\CompositeExpression;
+use Mautic\LeadBundle\Segment\ContactSegmentFilterCrate;
+use Mautic\LeadBundle\Segment\Decorator\DateDecorator;
+use Mautic\LeadBundle\Segment\Decorator\FilterDecoratorInterface;
+use Mautic\LeadBundle\Segment\Decorator\ParseDateFilterValueTrait;
+
+final class DateDefault implements FilterDecoratorInterface
+{
+    use ParseDateFilterValueTrait;
+
+    /**
+     * @param string $originalValue
+     */
+    public function __construct(
+        private readonly DateDecorator $dateDecorator,
+        private $originalValue,
+    ) {
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getField(ContactSegmentFilterCrate $contactSegmentFilterCrate)
+    {
+        return $this->dateDecorator->getField($contactSegmentFilterCrate);
+    }
+
+    public function getTable(ContactSegmentFilterCrate $contactSegmentFilterCrate): string
+    {
+        return $this->dateDecorator->getTable($contactSegmentFilterCrate);
+    }
+
+    /**
+     * @return string
+     */
+    public function getOperator(ContactSegmentFilterCrate $contactSegmentFilterCrate)
+    {
+        return $this->dateDecorator->getOperator($contactSegmentFilterCrate);
+    }
+
+    /**
+     * @param array|string $argument
+     */
+    public function getParameterHolder(ContactSegmentFilterCrate $contactSegmentFilterCrate, $argument): string|array
+    {
+        return $this->dateDecorator->getParameterHolder($contactSegmentFilterCrate, $argument);
+    }
+
+    /**
+     * @return array|bool|float|string|null
+     */
+    public function getParameterValue(ContactSegmentFilterCrate $contactSegmentFilterCrate): mixed
+    {
+        $filter = $this->parseDateFilterValue($this->originalValue, $contactSegmentFilterCrate->getOperator());
+
+        return match ($contactSegmentFilterCrate->getOperator()) {
+            'like', '!like' => !str_contains($filter, '%') ? '%'.$filter.'%' : $filter,
+            'contains'   => '%'.$filter.'%',
+            'startsWith' => $filter.'%',
+            'endsWith'   => '%'.$filter,
+            default      => $filter,
+        };
+    }
+
+    public function getQueryType(ContactSegmentFilterCrate $contactSegmentFilterCrate): string
+    {
+        return $this->dateDecorator->getQueryType($contactSegmentFilterCrate);
+    }
+
+    public function getAggregateFunc(ContactSegmentFilterCrate $contactSegmentFilterCrate): string|bool
+    {
+        return $this->dateDecorator->getAggregateFunc($contactSegmentFilterCrate);
+    }
+
+    public function getWhere(ContactSegmentFilterCrate $contactSegmentFilterCrate): CompositeExpression|string|null
+    {
+        return $this->dateDecorator->getWhere($contactSegmentFilterCrate);
+    }
+}

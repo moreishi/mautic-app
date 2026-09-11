@@ -1,0 +1,137 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\MarketplaceBundle\Collection;
+
+use Mautic\MarketplaceBundle\DTO\Version;
+use Mautic\MarketplaceBundle\Exception\RecordNotFoundException;
+
+final class VersionCollection implements \Iterator, \Countable, \ArrayAccess
+{
+    /**
+     * @var Version[]
+     */
+    private array $records;
+
+    private int $position = 0;
+
+    /**
+     * @param Version[] $records
+     */
+    public function __construct(array $records = [])
+    {
+        $this->records = array_values($records);
+    }
+
+    public static function fromArray(array $array): self
+    {
+        return new self(
+            array_map(
+                Version::fromArray(...),
+                $array
+            )
+        );
+    }
+
+    public function map(callable $callback): self
+    {
+        return new self(array_map($callback, $this->records));
+    }
+
+    public function sortByLatest(): self
+    {
+        $records = $this->records;
+
+        usort(
+            $records,
+            fn (Version $versionA, Version $versionB): int => $versionB->time->getTimestamp() - $versionA->time->getTimestamp()
+        );
+
+        return new self($records);
+    }
+
+    public function filter(callable $callback): self
+    {
+        return new self(array_values(array_filter($this->records, $callback)));
+    }
+
+    /**
+     * Finds the latest stable version. If no stable version is found, returns the version with latest timestamp.
+     */
+    public function findLatestStableVersionPackage(): ?Version
+    {
+        return $this->sortByLatest()->filter(fn (Version $version): bool => $version->isStable())->first();
+    }
+
+    /**
+     * Finds the latest stable version. If no stable version is found, returns the version with latest timestamp.
+     */
+    public function findLatestVersionPackage(): ?Version
+    {
+        return $this->sortByLatest()->first();
+    }
+
+    public function current(): Version
+    {
+        return $this->records[$this->position];
+    }
+
+    public function first(): ?Version
+    {
+        return $this->records[0] ?? null;
+    }
+
+    public function next(): void
+    {
+        ++$this->position;
+    }
+
+    public function key(): mixed
+    {
+        return $this->position;
+    }
+
+    public function valid(): bool
+    {
+        return isset($this->records[$this->position]);
+    }
+
+    public function rewind(): void
+    {
+        $this->position = 0;
+    }
+
+    public function count(): int
+    {
+        return count($this->records);
+    }
+
+    public function offsetSet($offset, $value): void
+    {
+        if (null === $offset) {
+            $this->records[] = $value;
+        } else {
+            $this->records[$offset] = $value;
+        }
+    }
+
+    public function offsetExists($offset): bool
+    {
+        return isset($this->records[$offset]);
+    }
+
+    public function offsetUnset($offset): void
+    {
+        unset($this->records[$offset]);
+    }
+
+    public function offsetGet($offset): Version
+    {
+        if (isset($this->records[$offset])) {
+            return $this->records[$offset];
+        }
+
+        throw new RecordNotFoundException("Version on offset {$offset} was not found");
+    }
+}

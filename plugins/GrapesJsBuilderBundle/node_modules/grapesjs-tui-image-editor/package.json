@@ -1,0 +1,31 @@
+{
+  "name": "grapesjs-tui-image-editor",
+  "version": "1.0.2",
+  "description": "GrapesJS TOAST UI Image Editor",
+  "main": "dist/index.js",
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "grapesjs-cli build",
+    "start": "grapesjs-cli serve"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GrapesJS/tui-image-editor.git"
+  },
+  "keywords": [
+    "grapesjs",
+    "plugin",
+    "image",
+    "editor"
+  ],
+  "author": "Artur Arseniev",
+  "license": "BSD-3-Clause",
+  "devDependencies": {
+    "ajv": "^8.12.0",
+    "grapesjs": "^0.21.2",
+    "grapesjs-cli": "^4.1.1",
+    "tui-image-editor": "^3.15.3"
+  }
+}

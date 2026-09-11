@@ -1,0 +1,190 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mautic\UserBundle\Entity;
+
+use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\Delete;
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\Patch;
+use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Put;
+use Doctrine\ORM\Mapping as ORM;
+use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
+use Mautic\CoreBundle\Entity\CacheInvalidateInterface;
+use Mautic\CoreBundle\Entity\UuidInterface;
+use Mautic\CoreBundle\Entity\UuidTrait;
+use Symfony\Component\Serializer\Attribute\Groups;
+
+#[ApiResource(
+    operations: [
+        new GetCollection(security: "is_granted('user:roles:viewown')"),
+        new Post(security: "is_granted('user:roles:create')"),
+        new Get(security: "is_granted('user:roles:viewown', object)"),
+        new Put(security: "is_granted('user:roles:editown', object)"),
+        new Patch(security: "is_granted('user:roles:editother', object)"),
+        new Delete(security: "is_granted('user:roles:deleteown', object)"),
+    ],
+    normalizationContext: [
+        'groups'                  => ['permission:read'],
+        'swagger_definition_name' => 'Read',
+    ],
+    denormalizationContext: [
+        'groups'                  => ['permission:write'],
+        'swagger_definition_name' => 'Write',
+    ]
+)]
+class Permission implements CacheInvalidateInterface, UuidInterface
+{
+    use UuidTrait;
+
+    public const CACHE_NAMESPACE = 'Permission';
+
+    /**
+     * @var int
+     */
+    #[Groups(['permission:read', 'role:read'])]
+    protected $id;
+
+    /**
+     * @var string
+     */
+    #[Groups(['permission:read', 'permission:write', 'role:read'])]
+    protected $bundle;
+
+    /**
+     * @var string
+     */
+    #[Groups(['permission:read', 'permission:write', 'role:read'])]
+    protected $name;
+
+    /**
+     * @var Role
+     */
+    #[Groups(['permission:read', 'permission:write', 'role:read'])]
+    protected $role;
+
+    /**
+     * @var int
+     */
+    #[Groups(['permission:read', 'permission:write', 'role:read'])]
+    protected $bitwise;
+
+    public static function loadMetadata(ORM\ClassMetadata $metadata): void
+    {
+        $builder = new ClassMetadataBuilder($metadata);
+
+        $builder->setTable('permissions')
+            ->setCustomRepositoryClass(PermissionRepository::class)
+            ->addUniqueConstraint(['bundle', 'name', 'role_id'], 'unique_perm');
+
+        $builder->addId();
+
+        $builder->createField('bundle', 'string')
+            ->length(50)
+            ->build();
+
+        $builder->createField('name', 'string')
+            ->length(50)
+            ->build();
+
+        $builder->createManyToOne('role', 'Role')
+            ->inversedBy('permissions')
+            ->addJoinColumn('role_id', 'id', false, false, 'CASCADE')
+            ->isOwnershipParent()
+            ->build();
+
+        $builder->addField('bitwise', 'integer');
+
+        static::addUuidField($builder);
+    }
+
+    /**
+     * @return int|null
+     */
+    public function getId()
+    {
+        return $this->id;
+    }
+
+    /**
+     * @param string $bundle
+     */
+    public function setBundle($bundle): static
+    {
+        $this->bundle = $bundle;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getBundle()
+    {
+        return $this->bundle;
+    }
+
+    /**
+     * @param int $bitwise
+     */
+    public function setBitwise($bitwise): static
+    {
+        $this->bitwise = $bitwise;
+
+        return $this;
+    }
+
+    /**
+     * @return int|null
+     */
+    public function getBitwise()
+    {
+        return $this->bitwise;
+    }
+
+    public function setRole(?Role $role = null): static
+    {
+        $this->role = $role;
+
+        return $this;
+    }
+
+    /**
+     * @return Role|null
+     */
+    public function getRole()
+    {
+        return $this->role;
+    }
+
+    /**
+     * @param string $name
+     */
+    public function setName($name): static
+    {
+        $this->name = $name;
+
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getName()
+    {
+        return $this->name;
+    }
+
+    public function getCacheNamespacesToDelete(): array
+    {
+        return [self::CACHE_NAMESPACE];
+    }
+
+    public function getPermissionUser(): mixed
+    {
+        return $this->role->getCreatedBy();
+    }
+}

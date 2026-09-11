@@ -1,0 +1,27 @@
+<?php
+
+namespace Mautic\CoreBundle\Security\Permissions;
+
+use Symfony\Component\Form\FormBuilderInterface;
+
+final class SystemPermissions extends AbstractPermissions
+{
+    /**
+     * @param mixed[] $params
+     */
+    public function __construct(array $params)
+    {
+        parent::__construct($params);
+        $this->addStandardPermissions('themes');
+    }
+
+    public function getName(): string
+    {
+        return 'core';
+    }
+
+    public function buildForm(FormBuilderInterface &$builder, array $options, array $data): void
+    {
+        $this->addStandardFormFields('core', 'themes', $builder, $data);
+    }
+}

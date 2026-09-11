@@ -1,0 +1,258 @@
+{% extends '@MauticCore/Default/content.html.twig' %}
+{% block mauticContent %}asset{% endblock %}
+
+{% block preHeader %}
+{{- include('@MauticCore/Helper/page_actions.html.twig',
+        {
+            'item'            : activeAsset,
+            'templateButtons' : {
+                'close' : securityHasEntityAccess(
+                    permissions['asset:assets:viewown'],
+                    permissions['asset:assets:viewother'],
+                    activeAsset.getCreatedBy()
+                ),
+            },
+            'routeBase'  : 'asset',
+            'langVar'    : 'asset.asset',
+            'nameGetter' : 'getTitle',
+            'targetLabel': 'mautic.asset.assets'|trans
+        }
+    ) -}}
+    {{ include('@MauticCore/Modules/category--inline.html.twig', {'category': activeAsset.category}) }}
+    {{ include('@MauticProject/Modules/projects.html.twig', {'item': activeAsset}) }}
+{% endblock %}
+
+{% block headerTitle %} {{ activeAsset.getTitle() }} {% endblock %}
+
+{% block actions %}
+{{- include('@MauticCore/Helper/page_actions.html.twig',
+        {
+            'item'            : activeAsset,
+            'templateButtons' : {
+                'edit' : securityHasEntityAccess(
+                    permissions['asset:assets:editown'],
+                    permissions['asset:assets:editother'],
+                    activeAsset.getCreatedBy()
+                ),
+                'clone'  : permissions['asset:assets:create'],
+                'delete' : securityHasEntityAccess(
+                    permissions['asset:assets:deleteown'],
+                    permissions['asset:assets:deleteother'],
+                    activeAsset.getCreatedBy()
+                ),
+            },
+            'routeBase'  : 'asset',
+            'langVar'    : 'asset.asset',
+            'nameGetter' : 'getTitle',
+}) -}}
+{% endblock %}
+
+{% block publishStatus %}
+    {{- include('@MauticCore/Helper/publishstatus_badge.html.twig', {
+        'entity': activeAsset,
+        'status': 'available'
+    }) -}}
+    <div class="label__divider"></div>
+
+    {# Asset type #}
+    {% if activeAsset.getFileType() is defined and activeAsset.getFileType() is not empty %}
+        {% set fileType = activeAsset.getFileType()|lower %}
+        {% set extensionGroups = activeAsset.getFileExtensions()|default([]) %}
+        {% set type = 'fallback' %}
+        {% for group, exts in extensionGroups %}
+            {% if fileType in exts %}
+                {% set type = group %}
+            {% endif %}
+        {% endfor %}
+        {% include '@MauticCore/Helper/_tag.html.twig' with {
+            tags: [{
+                label: ('mautic.asset.type.' ~ type)|trans,
+                icon: activeAsset.getIconClass()|default(''),
+                color: 'high-contrast'
+            }]
+        } %}
+    {% endif %}
+
+    {# Disallow indexing #}
+    {% if activeAsset.getDisallow() is defined and activeAsset.getDisallow() == 1 %}
+        {% include '@MauticCore/Helper/_tag.html.twig' with {
+            tags: [{
+                label: 'mautic.asset.tag.disallow.label'|trans,
+                icon: 'ri-eye-off-fill',
+                color: 'blue',
+                icon_only: true
+            }]
+        } %}
+    {% endif %}
+
+    {# Storage location #}
+    {% if activeAsset.getStorageLocation() is defined %}
+        {% include '@MauticCore/Helper/_tag.html.twig' with {
+            tags: [{
+                label: ('mautic.asset.tag.storage.' ~ activeAsset.getStorageLocation())|trans,
+                icon: activeAsset.getStorageLocation() == 'local' ? 'ri-hard-drive-2-fill' : 'ri-cloud-fill',
+                color: 'blue',
+                icon_only: true
+            }]
+        } %}
+    {% endif %}
+
+    {# Language #}
+    {% if activeAsset.getLanguage() is defined and activeAsset.getLanguage() is not empty %}
+        {% include '@MauticCore/Helper/_tag.html.twig' with {
+            tags: [{
+                label: activeAsset.getLanguage()|language_name|capitalize,
+                icon: 'ri-translate-2',
+                color: 'warm-gray',
+                attributes: {
+                    'data-toggle': 'tooltip',
+                    'data-placement': 'top',
+                    'title': 'mautic.core.language'|trans
+                }
+            }]
+        } %}
+    {% endif %}
+{% endblock %}
+
+{% block content %}
+
+<!-- start: box layout -->
+<div class="box-layout">
+    <!-- left section -->
+    <div class="col-md-9 height-auto">
+        <div>
+            <!-- asset detail header -->
+            {% include '@MauticCore/Helper/description--expanded.html.twig' with {'description': activeAsset.description} %}
+            <!--/ asset detail header -->
+            <!-- asset detail collapseable -->
+            <div class="collapse pr-md pl-md" id="asset-details">
+                <div class="pr-md pl-md pb-md">
+                    <div class="panel shd-none mb-0">
+                        <table class="table table-hover mb-0">
+                            <tbody>
+                            {{- include(
+                                '@MauticCore/Helper/details.html.twig',
+                                {'entity' : activeAsset}
+                            ) -}}
+                            <tr>
+                                <td width="20%">
+                                <span class="fw-b textTitle">
+                                {% trans %}mautic.asset.asset.size{% endtrans %}
+                                </span>
+                                </td>
+                                <td>{{ activeAsset.getSize() }}</td>
+                            </tr>
+                            <tr>
+                                <td width="20%"><span class="fw-b textTitle">{% trans %}mautic.asset.asset.url{% endtrans %}</span></td>
+                                <td>{{ assetDownloadUrl }}</td>
+                            </tr>
+                            <tr>
+                                <td width="20%"><span class="fw-b textTitle">{% trans %}mautic.asset.filename.original{% endtrans %}</span></td>
+                                <td>{{ activeAsset.getOriginalFilename() }}</td>
+                            </tr>
+                            <tr>
+                                {% set location = activeAsset.getStorageLocation() %}
+                                <td width="20%"><span class="fw-b textTitle">{{ ('mautic.asset.filename.' ~ location)|trans }}</span></td>
+                                <td>{{ ('local' == location) ? activeAsset.getPath() : activeAsset.getRemotePath() }}</td>
+                            </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <!--/ asset detail collapseable -->
+        </div>
+
+        <div>
+            <!-- asset detail collapseable toggler -->
+            <div class="hr-expand nm">
+                <span data-toggle="tooltip" title="Detail">
+                    <a href="javascript:void(0)" class="arrow text-secondary collapsed" data-toggle="collapse"
+                       data-target="#asset-details"><span class="caret"></span> {% trans %}mautic.core.details{% endtrans %}</a>
+                </span>
+            </div>
+            <!--/ asset detail collapseable toggler -->
+
+            <!-- some stats -->
+            <div class="pa-md">
+                <div class="row">
+                    <div class="col-sm-12">
+                        {% include '@MauticCore/Modules/stat--icon.html.twig' with {
+                            'stats': [
+                                {
+                                    'title': 'mautic.asset.asset.downloads.total',
+                                    'value': stats.downloads.total,
+                                    'tooltip': 'mautic.asset.asset.downloads.total.all_time',
+                                    'icon': 'ri-download-line'
+                                },
+                                {
+                                    'title': 'mautic.asset.asset.downloads.unique',
+                                    'value': stats.downloads.unique,
+                                    'tooltip': 'mautic.asset.asset.downloads.unique.all_time',
+                                    'icon': 'ri-user-6-line'
+                                }
+                            ]
+                        } %}
+                        <div class="panel">
+                            <div class="panel-body box-layout">
+                                <div class="col-md-4 va-m">
+                                    <h5 class="text-white dark-md fw-sb mb-xs">
+                                        <span class="ri-download-line"></span>
+                                        {% trans %}mautic.asset.graph.line.downloads{% endtrans %}
+                                    </h5>
+                                </div>
+                                <div class="col-md-8 va-m">
+                                    {{- include('@MauticCore/Helper/graph_dateselect.html.twig', {'dateRangeForm' : dateRangeForm, 'class' : 'pull-right'}) -}}
+                                </div>
+                            </div>
+                            <div class="d-flex fd-column pt-0 pl-15 pb-15 pr-15 min-h-256">
+                                {{- include('@MauticCore/Helper/chart.html.twig', {'chartData' : stats.downloads.timeStats, 'chartType' : 'line', 'chartHeight' : 300}) -}}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!--/ stats -->
+        </div>
+
+        {{ customContent('details.stats.graph.below', _context) }}
+    </div>
+    <!--/ left section -->
+
+    <!-- right section -->
+    <div class="col-md-3 bdr-l height-auto">
+        <!-- preview URL -->
+        <div class="panel shd-none bdr-rds-0 bdr-w-0 mt-sm mb-0">
+            <div class="panel-body pt-xs">
+                {% include '@MauticCore/Components/card.html.twig' with {
+                type: 'link',
+                href: assetDownloadUrl,
+                ctaType: 'external',
+                heading: 'mautic.core.open_link',
+                attributes: {
+                    'target': '_blank'
+                }
+            } %}
+            {{- include('@MauticAsset/Modules/preview.html.twig',
+            {
+                'variant': 'dialog',
+                'activeAsset' : activeAsset,
+                'assetDownloadUrl' : url(
+                'mautic_asset_action',
+                {'objectAction' : 'preview', 'objectId' : activeAsset.getId()}
+            )}) -}}
+            </div>
+        </div>
+        <!--/ preview URL -->
+
+        <hr class="hr-w-2" style="width:50%">
+
+        <!-- activity feed -->
+        {{- include('@MauticCore/Helper/recentactivity.html.twig', {'logs' : logs}) -}}
+    </div>
+    <!--/ right section -->
+    <input name="entityId" id="entityId" type="hidden" value="{{ activeAsset.getId() }}"/>
+</div>
+<!--/ end: box layout -->
+
+{% endblock %}

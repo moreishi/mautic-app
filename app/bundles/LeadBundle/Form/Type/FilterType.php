@@ -1,0 +1,167 @@
+<?php
+
+namespace Mautic\LeadBundle\Form\Type;
+
+use Mautic\LeadBundle\Model\ListModel;
+use Mautic\LeadBundle\Provider\FormAdjustmentsProviderInterface;
+use Mautic\LeadBundle\Provider\TypeOperatorProviderInterface;
+use Mautic\LeadBundle\Segment\OperatorOptions;
+use Symfony\Component\Form\AbstractType;
+use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+use Symfony\Component\Form\Extension\Core\Type\HiddenType;
+use Symfony\Component\Form\FormBuilderInterface;
+use Symfony\Component\Form\FormEvent;
+use Symfony\Component\Form\FormEvents;
+use Symfony\Component\Form\FormInterface;
+use Symfony\Component\Form\FormView;
+use Symfony\Component\OptionsResolver\OptionsResolver;
+
+/**
+ * @extends AbstractType<mixed>
+ */
+final class FilterType extends AbstractType
+{
+    public function __construct(
+        private readonly FormAdjustmentsProviderInterface $formAdjustmentsProvider,
+        private readonly ListModel $listModel,
+        TypeOperatorProviderInterface $typeOperatorProvider,
+    ) {
+        $typeOperatorProvider->setContext('segment');
+    }
+
+    public function buildForm(FormBuilderInterface $builder, array $options): void
+    {
+        $fieldChoices = $this->listModel->getChoiceFields();
+
+        $builder->add(
+            'glue',
+            ChoiceType::class,
+            [
+                'label'   => false,
+                'choices' => [
+                    'mautic.lead.list.form.glue.and' => 'and',
+                    'mautic.lead.list.form.glue.or'  => 'or',
+                ],
+                'attr' => [
+                    'class'    => 'label label-warm-gray not-chosen glue-select',
+                    'onchange' => 'Mautic.updateFilterPositioning(this)',
+                ],
+            ]
+        );
+
+        $formModifier = function (FormEvent $event) use ($fieldChoices): void {
+            $data        = (array) $event->getData();
+            $form        = $event->getForm();
+            $fieldAlias  = $data['field'] ?? '';
+            $fieldObject = $data['object'] ?? 'behaviors';
+            // Looking for behaviors for BC reasons as some filters were moved from 'lead' to 'behaviors'.
+            $field       = $fieldChoices[$fieldObject][$fieldAlias] ?? $fieldChoices['behaviors'][$fieldAlias] ?? null;
+            $operators   = $field['operators'] ?? [];
+            $operator    = $data['operator'] ?? null;
+
+            if ($operators && !$operator) {
+                $operator = array_key_first($operators);
+            }
+
+            // Keep legacy operators available for existing saved segments, but not for new filters.
+            // @see https://github.com/mautic/mautic/pull/16012
+            $legacyOperators  = [OperatorOptions::INCLUDING_ALL, OperatorOptions::EXCLUDING_ALL];
+            $isLegacyOperator = null !== $operator && in_array($operator, $legacyOperators, true);
+
+            if ($isLegacyOperator && !in_array($operator, $operators, true)) {
+                $deprecatedOperatorTypes = $this->listModel->getOperatorsForFieldType([
+                    'include' => $legacyOperators,
+                ]);
+                $operators += array_filter($deprecatedOperatorTypes, static fn ($v): bool => $v === $operator);
+            }
+
+            $form->add(
+                'operator',
+                ChoiceType::class,
+                [
+                    'label'   => false,
+                    'choices' => $operators,
+                    'attr'    => [
+                        'class'    => 'form-control not-chosen',
+                        'onchange' => 'Mautic.convertLeadFilterInput(this)',
+                    ],
+                ]
+            );
+
+            $form->add(
+                'properties',
+                FilterPropertiesType::class,
+                [
+                    'label' => false,
+                ]
+            );
+
+            if (null === $field) {
+                // The field was probably deleted since the segment was created.
+                // Do not show up the filter based on a deleted field.
+                return;
+            }
+
+            $filterPropertiesType = $form->get('properties');
+
+            $this->setPropertiesFormData($filterPropertiesType, $data);
+
+            if ($fieldAlias && $operator) {
+                $this->formAdjustmentsProvider->adjustForm(
+                    $filterPropertiesType,
+                    $fieldAlias,
+                    $fieldObject,
+                    $operator,
+                    $field
+                );
+            }
+        };
+
+        $builder->addEventListener(FormEvents::PRE_SET_DATA, $formModifier);
+        $builder->addEventListener(FormEvents::PRE_SUBMIT, $formModifier);
+        $builder->add('field', HiddenType::class);
+        $builder->add('object', HiddenType::class);
+        $builder->add('type', HiddenType::class);
+    }
+
+    public function configureOptions(OptionsResolver $resolver): void
+    {
+        $resolver->setDefaults(
+            [
+                'label'          => false,
+                'error_bubbling' => false,
+            ]
+        );
+    }
+
+    public function buildView(FormView $view, FormInterface $form, array $options): void
+    {
+        $view->vars['fields'] = $this->listModel->getChoiceFields();
+    }
+
+    public function getBlockPrefix(): string
+    {
+        return 'leadlist_filter';
+    }
+
+    /**
+     * We have to ensure that the old data[filter] and data[display] will get to the properties form
+     * to keep BC for segments created before the properties form was added and the fitler and display
+     * fields were moved there.
+     *
+     * @param FormInterface<mixed> $filterPropertiesType
+     * @param mixed[]              $data
+     */
+    private function setPropertiesFormData(FormInterface $filterPropertiesType, array $data): void
+    {
+        if (empty($data['properties'])) {
+            $propertiesData = [
+                'filter'  => $data['filter'] ?? null,
+                'display' => $data['display'] ?? null,
+            ];
+            $filterPropertiesType->setData($propertiesData);
+        } else {
+            $filterPropertiesType->setData($data['properties'] ?? []);
+        }
+    }
+}
