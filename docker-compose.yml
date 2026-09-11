@@ -1,0 +1,132 @@
+# Coolify-ready stack for loucent-mautic (Mautic 7.2)
+#
+# Deploy options in Coolify:
+#   A) "Docker Compose" resource pointing at this repo (builds Dockerfile), or
+#   B) Paste this file into "Docker Compose Empty".
+#
+# Coolify conventions followed:
+#   - NO custom `networks:` (Coolify creates an isolated network per stack;
+#     custom networks cause intermittent 504s via Traefik).
+#   - NO `ports:` on web (Coolify/Traefik routes via FQDN you set in UI).
+#     Use `expose: ["80"]` so Traefik can reach Apache.
+#   - Named volumes only (Coolify creates/manages them, data survives redeploys).
+#   - Healthchecks for rolling updates + dependency ordering.
+#   - All secrets via environment (set in Coolify UI, never commit values).
+#
+# After first deploy, in Coolify UI set FQDN on service `mautic_web`,
+# e.g. https://mautic.yourdomain.com, then redeploy.
+
+services:
+  db:
+    image: mysql:8.4
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-mautic}
+      MYSQL_USER: ${MYSQL_USER:-mautic}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in Coolify env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in Coolify env}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$${MYSQL_USER} -p$${MYSQL_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  mautic_web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    expose:
+      - "80"
+    volumes:
+      # Persisted across redeploys (config holds local.php after first install)
+      - mautic-config:/var/www/html/config
+      - mautic-logs:/var/www/html/var/logs
+      - mautic-files:/var/www/html/media/files
+      - mautic-images:/var/www/html/media/images
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      APP_DEBUG: ${APP_DEBUG:-0}
+      MAUTIC_DB_HOST: db
+      MAUTIC_DB_PORT: "3306"
+      MAUTIC_DB_DATABASE: ${MYSQL_DATABASE:-mautic}
+      MAUTIC_DB_USER: ${MYSQL_USER:-mautic}
+      MAUTIC_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in Coolify env}
+      MAUTIC_SITE_URL: ${MAUTIC_SITE_URL:?Set MAUTIC_SITE_URL e.g. https://mautic.yourdomain.com}
+      MAUTIC_ADMIN_EMAIL: ${MAUTIC_ADMIN_EMAIL:-mautic@example.com}
+      MAUTIC_ADMIN_PASSWORD: ${MAUTIC_ADMIN_PASSWORD:?Set MAUTIC_ADMIN_PASSWORD in Coolify env}
+      MAUTIC_MAILER_DSN: ${MAUTIC_MAILER_DSN:-smtp://localhost:1025}
+      DOCKER_MAUTIC_ROLE: mautic_web
+      DOCKER_MAUTIC_RUN_MIGRATIONS: ${DOCKER_MAUTIC_RUN_MIGRATIONS:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/s/login -o /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+  mautic_cron:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["cron"]
+    volumes:
+      - mautic-config:/var/www/html/config
+      - mautic-logs:/var/www/html/var/logs
+      - mautic-files:/var/www/html/media/files
+      - mautic-images:/var/www/html/media/images
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      APP_DEBUG: ${APP_DEBUG:-0}
+      MAUTIC_DB_HOST: db
+      MAUTIC_DB_PORT: "3306"
+      MAUTIC_DB_DATABASE: ${MYSQL_DATABASE:-mautic}
+      MAUTIC_DB_USER: ${MYSQL_USER:-mautic}
+      MAUTIC_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in Coolify env}
+      MAUTIC_SITE_URL: ${MAUTIC_SITE_URL:?Set MAUTIC_SITE_URL e.g. https://mautic.yourdomain.com}
+      DOCKER_MAUTIC_ROLE: mautic_cron
+    depends_on:
+      mautic_web:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mautic_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["worker"]
+    volumes:
+      - mautic-config:/var/www/html/config
+      - mautic-logs:/var/www/html/var/logs
+      - mautic-files:/var/www/html/media/files
+      - mautic-images:/var/www/html/media/images
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      APP_DEBUG: ${APP_DEBUG:-0}
+      MAUTIC_DB_HOST: db
+      MAUTIC_DB_PORT: "3306"
+      MAUTIC_DB_DATABASE: ${MYSQL_DATABASE:-mautic}
+      MAUTIC_DB_USER: ${MYSQL_USER:-mautic}
+      MAUTIC_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in Coolify env}
+      DOCKER_MAUTIC_ROLE: mautic_worker
+      DOCKER_MAUTIC_WORKERS_CONSUME_EMAIL: ${DOCKER_MAUTIC_WORKERS_CONSUME_EMAIL:-2}
+      DOCKER_MAUTIC_WORKERS_CONSUME_HIT: ${DOCKER_MAUTIC_WORKERS_CONSUME_HIT:-2}
+      DOCKER_MAUTIC_WORKERS_CONSUME_FAILED: ${DOCKER_MAUTIC_WORKERS_CONSUME_FAILED:-2}
+    depends_on:
+      mautic_web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  mautic-config:
+  mautic-logs:
+  mautic-files:
+  mautic-images:

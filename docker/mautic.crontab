@@ -1,0 +1,12 @@
+# Mautic cron jobs for Coolify (runs as www-data inside mautic_cron service)
+# Minute Hour Day Month Weekday — keep 5/10/15-min cadence per Mautic docs
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+*/5 * * * * www-data php /var/www/html/bin/console mautic:segments:update --env=prod >> /var/www/html/var/logs/cron.log 2>&1
+*/5 * * * * www-data php /var/www/html/bin/console mautic:campaigns:update --env=prod >> /var/www/html/var/logs/cron.log 2>&1
+*/5 * * * * www-data php /var/www/html/bin/console mautic:campaigns:trigger --env=prod >> /var/www/html/var/logs/cron.log 2>&1
+*/10 * * * * www-data php /var/www/html/bin/console mautic:emails:send --env=prod >> /var/www/html/var/logs/cron.log 2>&1
+*/10 * * * * www-data php /var/www/html/bin/console mautic:messages:send --env=prod >> /var/www/html/var/logs/cron.log 2>&1
+*/15 * * * * www-data php /var/www/html/bin/console mautic:broadcasts:send --env=prod >> /var/www/html/var/logs/cron.log 2>&1
+0 * * * * www-data php /var/www/html/bin/console mautic:maintenance:cleanup --days-old=365 --env=prod >> /var/www/html/var/logs/cron.log 2>&1

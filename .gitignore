@@ -4,6 +4,8 @@
 !.htaccess
 !.gitkeep
 !.ddev
+!.dockerignore
+!.env.coolify.example
 !.php-cs-fixer.php
 !.github/ci-files/.my.cnf
 .ddev/mautic-preference
