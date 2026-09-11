@@ -11,7 +11,6 @@ ROLE="${DOCKER_MAUTIC_ROLE:-mautic_web}"
 if [ "${1:-}" = "cron" ]; then ROLE="mautic_cron"; shift; fi
 if [ "${1:-}" = "worker" ]; then ROLE="mautic_worker"; shift; fi
 
-: "${MAUTIC_DB_DRIVER:=pdo_mysql}"
 : "${MAUTIC_DB_HOST:=db}"
 : "${MAUTIC_DB_PORT:=3306}"
 : "${MAUTIC_DB_DATABASE:?MAUTIC_DB_DATABASE is required}"
@@ -25,36 +24,21 @@ if [ "${1:-}" = "worker" ]; then ROLE="mautic_worker"; shift; fi
 
 LOCAL_PHP="/var/www/html/config/local.php"
 
-echo "[entrypoint] role=${ROLE} driver=${MAUTIC_DB_DRIVER} db=${MAUTIC_DB_HOST}:${MAUTIC_DB_PORT}/${MAUTIC_DB_DATABASE}"
+echo "[entrypoint] role=${ROLE} db=${MAUTIC_DB_HOST}:${MAUTIC_DB_PORT}/${MAUTIC_DB_DATABASE}"
 
-# Wait for database (MySQL via mysqladmin, Postgres via pg_isready), max ~90s
+# Wait for MySQL (max ~90s)
 echo "[entrypoint] waiting for database..."
-if [ "${MAUTIC_DB_DRIVER}" = "pdo_pgsql" ]; then
-  export PGPASSWORD="${MAUTIC_DB_PASSWORD}"
-  for i in $(seq 1 45); do
-    if pg_isready -h"${MAUTIC_DB_HOST}" -p"${MAUTIC_DB_PORT}" -U"${MAUTIC_DB_USER}" -d"${MAUTIC_DB_DATABASE}" 2>/dev/null; then
-      echo "[entrypoint] database reachable"
-      break
-    fi
-    if [ "$i" -eq 45 ]; then
-      echo "[entrypoint] ERROR: database not reachable after 90s" >&2
-      exit 1
-    fi
-    sleep 2
-  done
-else
-  for i in $(seq 1 45); do
-    if mysqladmin ping -h"${MAUTIC_DB_HOST}" -P"${MAUTIC_DB_PORT}" -u"${MAUTIC_DB_USER}" -p"${MAUTIC_DB_PASSWORD}" --silent 2>/dev/null; then
-      echo "[entrypoint] database reachable"
-      break
-    fi
-    if [ "$i" -eq 45 ]; then
-      echo "[entrypoint] ERROR: database not reachable after 90s" >&2
-      exit 1
-    fi
-    sleep 2
-  done
-fi
+for i in $(seq 1 45); do
+  if mysqladmin ping -h"${MAUTIC_DB_HOST}" -P"${MAUTIC_DB_PORT}" -u"${MAUTIC_DB_USER}" -p"${MAUTIC_DB_PASSWORD}" --silent 2>/dev/null; then
+    echo "[entrypoint] database reachable"
+    break
+  fi
+  if [ "$i" -eq 45 ]; then
+    echo "[entrypoint] ERROR: database not reachable after 90s" >&2
+    exit 1
+  fi
+  sleep 2
+done
 
 # Generate local.php on first boot so config volume persists it
 if [ ! -f "${LOCAL_PHP}" ]; then
@@ -72,9 +56,7 @@ if [ ! -f "${LOCAL_PHP}" ]; then
 \$parameters = [
     'api_enabled'           => true,
     'api_enable_basic_auth' => true,
-    // NOTE: Mautic 7.2 core forces pdo_mysql in ParameterLoader; pdo_pgsql
-    // value is written for forward-compat but currently ignored by Mautic.
-    'db_driver'             => '${MAUTIC_DB_DRIVER}',
+    'db_driver'             => 'pdo_mysql',
     'db_host'               => '${MAUTIC_DB_HOST}',
     'db_table_prefix'       => null,
     'db_port'               => ${MAUTIC_DB_PORT},
