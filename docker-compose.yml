@@ -13,6 +13,13 @@
 #   - Healthchecks for rolling updates + dependency ordering.
 #   - All secrets via environment (set in Coolify UI, never commit values).
 #
+# NOTE on Postgres:
+#   Mautic 7.2 core hardcodes `pdo_mysql` (see
+#   app/bundles/CoreBundle/Loader/ParameterLoader.php), so Mautic itself MUST
+#   use the `db` (MySQL 8.4) service. A `postgres` (Postgres 16) service is
+#   included for aux tools / future Mautic support — enable by setting its
+#   POSTGRES_* vars in Coolify. Image also ships pdo_pgsql + postgresql-client.
+#
 # After first deploy, in Coolify UI set FQDN on service `mautic_web`,
 # e.g. https://mautic.yourdomain.com, then redeploy.
 
@@ -35,6 +42,24 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # Optional Postgres 16 for aux tools / future Mautic support.
+  # Mautic itself stays on `db` (MySQL) — see NOTE above.
+  postgres:
+    image: postgres:16-alpine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mautic_aux}
+      POSTGRES_USER: ${POSTGRES_USER:-mautic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-postgres-32-chars-min}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
   mautic_web:
     build:
       context: .
@@ -50,8 +75,9 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-prod}
       APP_DEBUG: ${APP_DEBUG:-0}
-      MAUTIC_DB_HOST: db
-      MAUTIC_DB_PORT: "3306"
+      MAUTIC_DB_DRIVER: ${MAUTIC_DB_DRIVER:-pdo_mysql}
+      MAUTIC_DB_HOST: ${MAUTIC_DB_HOST:-db}
+      MAUTIC_DB_PORT: ${MAUTIC_DB_PORT:-3306}
       MAUTIC_DB_DATABASE: ${MYSQL_DATABASE:-mautic}
       MAUTIC_DB_USER: ${MYSQL_USER:-mautic}
       MAUTIC_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in Coolify env}
@@ -85,8 +111,9 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-prod}
       APP_DEBUG: ${APP_DEBUG:-0}
-      MAUTIC_DB_HOST: db
-      MAUTIC_DB_PORT: "3306"
+      MAUTIC_DB_DRIVER: ${MAUTIC_DB_DRIVER:-pdo_mysql}
+      MAUTIC_DB_HOST: ${MAUTIC_DB_HOST:-db}
+      MAUTIC_DB_PORT: ${MAUTIC_DB_PORT:-3306}
       MAUTIC_DB_DATABASE: ${MYSQL_DATABASE:-mautic}
       MAUTIC_DB_USER: ${MYSQL_USER:-mautic}
       MAUTIC_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in Coolify env}
@@ -110,8 +137,9 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-prod}
       APP_DEBUG: ${APP_DEBUG:-0}
-      MAUTIC_DB_HOST: db
-      MAUTIC_DB_PORT: "3306"
+      MAUTIC_DB_DRIVER: ${MAUTIC_DB_DRIVER:-pdo_mysql}
+      MAUTIC_DB_HOST: ${MAUTIC_DB_HOST:-db}
+      MAUTIC_DB_PORT: ${MAUTIC_DB_PORT:-3306}
       MAUTIC_DB_DATABASE: ${MYSQL_DATABASE:-mautic}
       MAUTIC_DB_USER: ${MYSQL_USER:-mautic}
       MAUTIC_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in Coolify env}
@@ -126,6 +154,7 @@ services:
 
 volumes:
   mysql-data:
+  pgdata:
   mautic-config:
   mautic-logs:
   mautic-files:

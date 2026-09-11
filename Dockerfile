@@ -15,6 +15,9 @@ ENV APACHE_DOCUMENT_ROOT=/var/www/html \
     APP_DEBUG=0
 
 # --- System deps + PHP extensions (Mautic requires imap, gd, intl, pdo_mysql, zip, opcache, ...) ---
+# pdo_pgsql/pgsql + postgresql-client are included so the image is Postgres-ready
+# (Mautic 7.2 core still hardcodes pdo_mysql — see ParameterLoader — Postgres service
+# in compose is for aux tools / future support).
 # Use mlocati installer (same as official docker-mautic) for reliable builds
 ARG IPE_VERSION=2.9.28
 ARG IPE_SHA256=2f5970453effac47cfcceafd6103948d78b566c2fb922a8ff639fe249db74aa7
@@ -26,6 +29,7 @@ RUN apt-get update && apt-get upgrade -y \
         zip \
         curl \
         mariadb-client \
+        postgresql-client \
         supervisor \
         libavif15 \
         libfreetype6 \
@@ -50,6 +54,8 @@ RUN apt-get update && apt-get upgrade -y \
         mysqli \
         opcache \
         pdo_mysql \
+        pdo_pgsql \
+        pgsql \
         sockets \
         zip \
     && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false \
